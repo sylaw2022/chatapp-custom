@@ -1,0 +1,66 @@
+================================================================================
+HOSTING LOCALLY WITH NGROK - INSTRUCTIONS FOR README.docx
+================================================================================
+
+## Hosting Locally and Accessing via Internet with ngrok
+
+### Prerequisites
+- Node.js and npm installed
+- ngrok installed (download from https://ngrok.com/)
+
+### Method 1: Using the Automated Script
+
+1. Make sure the script is executable:
+   ```bash
+   chmod +x start-ngrok.sh
+   ```
+
+2. Run the script:
+   ```bash
+   ./start-ngrok.sh
+   ```
+
+3. The script will:
+   - Start the Next.js development server on port 3000
+   - Wait for the server to be ready
+   - Start ngrok tunnel automatically
+   - Display the public ngrok URL
+
+4. Access your app:
+   - Local: http://localhost:3000
+   - Public: Check the ngrok URL displayed in the terminal (e.g., https://xxxxx.ngrok-free.dev)
+   - Note: On first visit, ngrok free tier shows a warning page - click "Visit Site" to continue
+
+5. View ngrok dashboard:
+   - Open http://localhost:4040 in your browser to see request logs
+
+6. To stop:
+   - Press Ctrl+C in the terminal
+
+### Method 2: Manual Steps
+
+1. Start the Next.js development server:
+   ```bash
+   npm run dev
+   ```
+   The server will run on http://localhost:3000
+
+2. In a new terminal, start ngrok:
+   ```bash
+   ngrok http 3000
+   ```
+
+3. Copy the public URL from ngrok output (e.g., https://xxxxx.ngrok-free.dev)
+
+4. Access your app from anywhere using the ngrok URL
+
+5. View ngrok dashboard at http://localhost:4040
+
+### Troubleshooting
+
+- If port 3000 is already in use, change the port in package.json or use: `npm run dev -- -p 3001`
+- If ngrok is not found, make sure it's installed and in your PATH
+- The ngrok URL changes each time you restart ngrok (unless you have a paid plan with a static domain)
+
+================================================================================
+
