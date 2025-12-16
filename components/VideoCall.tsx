@@ -216,7 +216,7 @@ export default function VideoCall({ currentUser, activeChat, isGroup, incomingMo
             </button>
           </div>
           
-          <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-2 md:gap-3">
             {/* My Stream */}
             <div className="relative aspect-video bg-black rounded-lg overflow-hidden border border-gray-700 shadow-inner">
                {callType === 'video' ? (

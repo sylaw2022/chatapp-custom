@@ -18,7 +18,7 @@ export default function Home() {
   
   const supabase = createClient()
 
-  // Clear accepted mode when switching chats manually
+  // Clear accepted mode when switching chats
   useEffect(() => {
     if (activeChat) {
       const timer = setTimeout(() => setAcceptedCallMode(null), 2000)
@@ -44,10 +44,8 @@ export default function Home() {
     setIncomingCall(null)
   }
 
-  // --- NEW: Handle Profile Update ---
   const handleProfileUpdate = (updatedUser: User) => {
     setCurrentUser(updatedUser)
-    // Also update activeChat if we are chatting with ourselves (rare, but good for consistency)
     if (activeChat?.id === updatedUser.id && !isGroup) {
       setActiveChat(updatedUser)
     }
@@ -56,7 +54,7 @@ export default function Home() {
   if (!currentUser) return <Auth onLogin={setCurrentUser} />
 
   return (
-    <main className="flex min-h-screen bg-black">
+    <main className="flex h-screen bg-black overflow-hidden relative">
       {incomingCall && (
         <IncomingCall 
           caller={incomingCall.caller}
@@ -66,19 +64,37 @@ export default function Home() {
         />
       )}
 
-      {/* Pass onUpdateUser to Sidebar */}
-      <Sidebar 
-        currentUser={currentUser} 
-        onSelect={(chat, group) => { setActiveChat(chat); setIsGroup(group); }} 
-        onUpdateUser={handleProfileUpdate} 
-      />
+      {/* 
+        SIDEBAR CONTAINER 
+        - Mobile: Hidden if chat is active. W-full.
+        - Desktop (md): Always flex. Fixed width handled inside component.
+      */}
+      <div className={`
+        ${activeChat ? 'hidden md:flex' : 'flex'} 
+        w-full md:w-auto flex-col h-full z-20
+      `}>
+        <Sidebar 
+          currentUser={currentUser} 
+          onSelect={(chat, group) => { setActiveChat(chat); setIsGroup(group); }} 
+          onUpdateUser={handleProfileUpdate} 
+        />
+      </div>
       
-      <div className="flex-1 flex flex-col relative">
+      {/* 
+        CHAT WINDOW CONTAINER
+        - Mobile: Hidden if NO chat active. W-full.
+        - Desktop (md): Always flex. Flex-1 to take remaining space.
+      */}
+      <div className={`
+        ${!activeChat ? 'hidden md:flex' : 'flex'} 
+        flex-1 flex-col h-full relative bg-slate-100 z-10
+      `}>
         <ChatWindow 
           user={currentUser} 
           activeChat={activeChat} 
           isGroup={isGroup} 
           acceptedCallMode={acceptedCallMode} 
+          onBack={() => setActiveChat(null)} // NEW: Pass back handler
         />
       </div>
     </main>

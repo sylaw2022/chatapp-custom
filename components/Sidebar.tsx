@@ -170,7 +170,7 @@ export default function Sidebar({ currentUser, onSelect, onUpdateUser }: Sidebar
   }
 
   return (
-    <div className="w-80 bg-gray-900 border-r border-gray-800 flex flex-col h-screen">
+    <div className="w-full md:w-80 bg-gray-900 border-r border-gray-800 flex flex-col h-full">
       {/* Current User Header */}
       <div className="p-4 bg-gray-950 border-b border-gray-800 flex items-center justify-between">
         <div className="flex items-center gap-3">
