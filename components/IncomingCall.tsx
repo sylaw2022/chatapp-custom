@@ -15,13 +15,18 @@ export default function IncomingCall({ caller, callType, onAccept, onReject }: I
   useEffect(() => {
     // Play ringtone on mount
     // You can replace this URL with a local file '/ringtone.mp3' in your public folder
-    audioRef.current = new Audio('https://upload.wikimedia.org/wikipedia/commons/e/e5/Tetris_theme.ogg') 
-    audioRef.current.loop = true
-    audioRef.current.play().catch(e => console.log("Audio autoplay blocked:", e))
+    const audio = new Audio('https://upload.wikimedia.org/wikipedia/commons/e/e5/Tetris_theme.ogg');
+    audio.loop = true;
+    audio.play().catch(e => console.log("Audio autoplay blocked:", e));
+    audioRef.current = audio;
 
     return () => {
-      audioRef.current?.pause()
-      audioRef.current = null
+      if (audioRef.current) {
+        audioRef.current.pause();
+        audioRef.current.src = ''; // Release audio resource
+        audioRef.current.load(); // Reset audio element
+        audioRef.current = null;
+      }
     }
   }, [])
 

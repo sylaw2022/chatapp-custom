@@ -1,7 +1,7 @@
-'use client'
 import { useState } from 'react'
 import { createClient } from '@/lib/supabase'
 import { User } from '@/types'
+import { Eye, EyeOff } from 'lucide-react'
 
 interface AuthProps {
   onLogin: (user: User) => void
@@ -13,6 +13,7 @@ export default function Auth({ onLogin }: AuthProps) {
   const [password, setPassword] = useState('')
   const [nickname, setNickname] = useState('')
   const [loading, setLoading] = useState(false)
+  const [showPassword, setShowPassword] = useState(false)
   const supabase = createClient()
 
   const handleAuth = async (e: React.FormEvent) => {
@@ -21,7 +22,6 @@ export default function Auth({ onLogin }: AuthProps) {
 
     try {
       if (isSignUp) {
-        // Custom Register
         const { data, error } = await supabase
           .from('users')
           .insert({
@@ -38,7 +38,6 @@ export default function Auth({ onLogin }: AuthProps) {
         alert('Account created! Please log in.')
         setIsSignUp(false)
       } else {
-        // Custom Login
         const { data, error } = await supabase
           .from('users')
           .select('*')
@@ -68,14 +67,23 @@ export default function Auth({ onLogin }: AuthProps) {
             onChange={e => setUsername(e.target.value)}
             required
           />
-          <input
-            type="password"
-            className="w-full p-3 rounded bg-slate-700 border border-slate-600"
-            placeholder="Password"
-            value={password}
-            onChange={e => setPassword(e.target.value)}
-            required
-          />
+          <div className="relative">
+            <input
+              type={showPassword ? 'text' : 'password'}
+              className="w-full p-3 rounded bg-slate-700 border border-slate-600 pr-10"
+              placeholder="Password"
+              value={password}
+              onChange={e => setPassword(e.target.value)}
+              required
+            />
+            <div className="absolute inset-y-0 right-0 pr-3 flex items-center">
+              {showPassword ? (
+                <EyeOff className="h-5 w-5 text-gray-400 cursor-pointer" onClick={() => setShowPassword(false)} />
+              ) : (
+                <Eye className="h-5 w-5 text-gray-400 cursor-pointer" onClick={() => setShowPassword(true)} />
+              )}
+            </div>
+          </div>
           {isSignUp && (
             <input
               className="w-full p-3 rounded bg-slate-700 border border-slate-600"
@@ -95,3 +103,4 @@ export default function Auth({ onLogin }: AuthProps) {
     </div>
   )
 }
+

@@ -123,7 +123,16 @@ export default function ChatWindow({ user, activeChat, isGroup, acceptedCallMode
         </div>
       </div>
 
-      <VideoCall currentUser={user} activeChat={activeChat} isGroup={isGroup} incomingMode={acceptedCallMode} />
+      <VideoCall 
+        currentUser={user} 
+        activeChat={activeChat} 
+        isGroup={isGroup} 
+        incomingMode={acceptedCallMode}
+        onCallEnd={() => {
+          // Call ended, reset any call-related state if needed
+          // This prop is required by VideoCall component
+        }}
+      />
 
       {/* Messages Area - Adjusted padding for mobile */}
       <div className="flex-1 overflow-y-auto p-2 md:p-4 space-y-4 md:space-y-6 bg-slate-100">

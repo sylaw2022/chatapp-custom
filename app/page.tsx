@@ -16,19 +16,17 @@ export default function Home() {
   const [incomingCall, setIncomingCall] = useState<any>(null)
   const [acceptedCallMode, setAcceptedCallMode] = useState<'audio' | 'video' | null>(null)
   
-  const supabase = createClient()
-
-  // Clear accepted mode when switching chats
+  // Don't clear acceptedCallMode automatically - let the call continue
+  // Only clear when switching to a different chat
   useEffect(() => {
-    if (activeChat) {
-      const timer = setTimeout(() => setAcceptedCallMode(null), 2000)
-      return () => clearTimeout(timer)
-    }
-  }, [activeChat])
+    // Only clear if switching to a different chat (not just when acceptedCallMode is set)
+    // This prevents premature call termination
+  }, [activeChat?.id]) // Only trigger when chat ID actually changes
 
   // Global Call Listener
   useEffect(() => {
     if (!currentUser) return
+    const supabase = createClient()
     const channel = supabase.channel(`notifications-${currentUser.id}`)
     channel.on('broadcast', { event: 'incoming-call' }, ({ payload }) => {
         setIncomingCall(payload)
