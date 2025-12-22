@@ -166,6 +166,7 @@ export default function VideoCall({ currentUser, activeChat, isGroup, incomingMo
   const handleSignalRef = useRef<any>(null);
   const pendingOffers = useRef<Set<number>>(new Set()); // Track peers we're creating offers for
   const hasJoinedRef = useRef<boolean>(false); // Track if we've already joined to prevent re-joining
+  const permissionDeniedRef = useRef<boolean>(false); // Track if permission was denied to prevent retry loops
   const currentUserRef = useRef<User>(currentUser); // Store currentUser in ref for cleanup
   const leaveSignalProcessedRef = useRef<Set<number>>(new Set()); // Track processed leave signals to prevent duplicates
   const supabase = createClient();
@@ -194,7 +195,11 @@ export default function VideoCall({ currentUser, activeChat, isGroup, incomingMo
     peerConnections.current.clear();
     iceCandidateQueue.current.clear();
     pendingOffers.current.clear();
-    hasJoinedRef.current = false;
+    // Only reset hasJoinedRef if permission wasn't denied (to prevent retry loop)
+    if (!permissionDeniedRef.current) {
+      hasJoinedRef.current = false;
+    }
+    // Don't reset permissionDeniedRef here - let it persist until incomingMode is cleared
     
     // Stop any media streams
     if (localStream.current) {
@@ -576,7 +581,11 @@ export default function VideoCall({ currentUser, activeChat, isGroup, incomingMo
     iceCandidateQueue.current.clear();
     pendingOffers.current.clear();
     leaveSignalProcessedRef.current.clear(); // Clear processed leave signals
-    hasJoinedRef.current = false; // Reset join flag
+    // Only reset hasJoinedRef if permission wasn't denied (to prevent retry loop)
+    if (!permissionDeniedRef.current) {
+      hasJoinedRef.current = false; // Reset join flag
+    }
+    // Don't reset permissionDeniedRef here - let it persist until incomingMode is cleared
     
     // DON'T clear handleSignalRef here - it will be set by useEffect when handleSignal changes
     // Clearing it can cause issues if a new call starts before the useEffect runs
@@ -969,11 +978,19 @@ export default function VideoCall({ currentUser, activeChat, isGroup, incomingMo
   }, []); // Empty deps - only run on mount/unmount
 
   // --- CORE LOGIC: INITIATE CALL (FROM BUTTON OR INCOMING NOTIFICATION) ---
-  const initiateCall = useCallback(async (type: 'audio' | 'video', notify: boolean) => {
+  // This version accepts an optional stream (for mobile compatibility)
+  const initiateCallWithStream = useCallback(async (type: 'audio' | 'video', notify: boolean, providedStream?: MediaStream) => {
     // Check if already in a call
     if (callState !== 'idle' && localStream.current) {
       console.warn('Already in a call. End current call first.');
       return;
+    }
+    
+    // Reset permission denied flag when user manually initiates a call
+    // This allows them to try again after a previous denial
+    if (permissionDeniedRef.current) {
+      console.log('🔄 [INITIATE CALL] Resetting permission denied flag for manual retry');
+      permissionDeniedRef.current = false;
     }
     
     // CRITICAL: Ensure handleSignalRef is set BEFORE starting the call
@@ -1086,15 +1103,19 @@ export default function VideoCall({ currentUser, activeChat, isGroup, incomingMo
         return;
       }
 
-      // This is the critical "Audio Unlock" step for cross-platform audio
+      // Use provided stream if available (from button click handler), otherwise request it
+      // CRITICAL FOR MOBILE: If stream is not provided, call getUserMedia IMMEDIATELY
+      // On mobile browsers (especially iOS Safari), getUserMedia must be called directly
+      // from a user gesture without async delays, otherwise permission will be denied
+      const stream = providedStream || await navigator.mediaDevices.getUserMedia({ video: type === 'video', audio: true });
+      
+      // Audio unlock can happen after getUserMedia (non-blocking for mobile)
       try {
         const audio = new Audio('data:audio/wav;base64,UklGRigAAABXQVZFZm10IBIAAAABAAEARKwAAIhYAQACABAAAABkYXRhAgAAAAEA');
-        await audio.play();
+        audio.play().catch(e => console.warn('Dummy audio play failed. Autoplay might not work.', e));
       } catch (e) {
         console.warn('Dummy audio play failed. Autoplay might not work.', e);
       }
-
-      const stream = await navigator.mediaDevices.getUserMedia({ video: type === 'video', audio: true });
       localStream.current = stream;
       
       // Process stream with background if video call
@@ -1173,7 +1194,15 @@ export default function VideoCall({ currentUser, activeChat, isGroup, incomingMo
       console.error("Failed to get media:", err);
       let errorMessage = "Could not access Camera/Microphone. ";
       if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
-        errorMessage += "Please allow camera/microphone access in your browser settings.";
+        // Mark permission as denied to prevent retry loop
+        permissionDeniedRef.current = true;
+        // Provide mobile-specific instructions
+        const isMobile = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
+        if (isMobile) {
+          errorMessage += "On mobile devices, please:\n1. Tap the button again to grant permission\n2. Make sure you're using HTTPS (required for camera/microphone)\n3. For iOS Safari, try adding the site to your home screen";
+        } else {
+          errorMessage += "Please allow camera/microphone access in your browser settings.";
+        }
       } else if (err.name === 'NotFoundError' || err.name === 'DevicesNotFoundError') {
         errorMessage += "No camera/microphone found. Please connect a device.";
       } else if (err.name === 'NotReadableError' || err.name === 'TrackStartError') {
@@ -1187,8 +1216,19 @@ export default function VideoCall({ currentUser, activeChat, isGroup, incomingMo
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isGroup, supabase, activeChat.id, currentUser, roomId, callState, cleanup]);
   
+  // Wrapper for backward compatibility (calls initiateCallWithStream without stream)
+  const initiateCall = useCallback(async (type: 'audio' | 'video', notify: boolean) => {
+    return initiateCallWithStream(type, notify);
+  }, [initiateCallWithStream]);
+  
   // Auto-join when accepting incoming call
   useEffect(() => {
+    // Don't auto-join if permission was denied (prevents retry loop)
+    if (permissionDeniedRef.current) {
+      console.log('⏭️ Skipping auto-join because permission was denied');
+      return;
+    }
+    
     if (incomingMode && callState === 'idle' && !localStream.current && !hasJoinedRef.current) {
       // For accepted incoming calls, auto-join instead of prompting
       console.log('📞 Auto-join triggered: incomingMode:', incomingMode, 'callState:', callState, 'hasJoined:', hasJoinedRef.current);
@@ -1205,16 +1245,19 @@ export default function VideoCall({ currentUser, activeChat, isGroup, incomingMo
           return;
         }
 
-        // This is the critical "Audio Unlock" step for cross-platform audio
         try {
-          const audio = new Audio('data:audio/wav;base64,UklGRigAAABXQVZFZm10IBIAAAABAAEARKwAAIhYAQACABAAAABkYXRhAgAAAAEA');
-          await audio.play();
-        } catch (e) {
-          console.warn('Dummy audio play failed. Autoplay might not work.', e);
-        }
-
-        try {
+          // CRITICAL FOR MOBILE: Call getUserMedia IMMEDIATELY while user gesture is still valid
+          // On mobile browsers (especially iOS Safari), getUserMedia must be called directly
+          // from a user gesture without async delays, otherwise permission will be denied
           const stream = await navigator.mediaDevices.getUserMedia({ video: incomingMode === 'video', audio: true });
+          
+          // Audio unlock can happen after getUserMedia (non-blocking for mobile)
+          try {
+            const audio = new Audio('data:audio/wav;base64,UklGRigAAABXQVZFZm10IBIAAAABAAEARKwAAIhYAQACABAAAABkYXRhAgAAAAEA');
+            audio.play().catch(e => console.warn('Dummy audio play failed. Autoplay might not work.', e));
+          } catch (e) {
+            console.warn('Dummy audio play failed. Autoplay might not work.', e);
+          }
           localStream.current = stream;
           
           // Process stream with background if video call
@@ -1314,6 +1357,10 @@ export default function VideoCall({ currentUser, activeChat, isGroup, incomingMo
           console.error("Failed to get media:", err);
           let errorMessage = "Could not access Camera/Microphone. ";
           if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
+            // Mark permission as denied to prevent retry loop
+            permissionDeniedRef.current = true;
+            // Keep hasJoinedRef true to prevent retry
+            hasJoinedRef.current = true;
             errorMessage += "Please allow camera/microphone access in your browser settings.";
           } else if (err.name === 'NotFoundError' || err.name === 'DevicesNotFoundError') {
             errorMessage += "No camera/microphone found. Please connect a device.";
@@ -1323,21 +1370,33 @@ export default function VideoCall({ currentUser, activeChat, isGroup, incomingMo
             errorMessage += "Please check permissions and try again.";
           }
           alert(errorMessage);
+          // Clear incomingMode by calling onCallEnd to prevent retry loop
+          onCallEnd();
           await cleanup(false);
         }
       };
       
       autoJoin();
     }
-    // Reset hasJoinedRef when incomingMode becomes null (call ended or cleared)
+    // Reset hasJoinedRef and permissionDeniedRef when incomingMode becomes null (call ended or cleared)
     if (!incomingMode && hasJoinedRef.current) {
       console.log('🔄 Resetting hasJoinedRef because incomingMode is null');
       hasJoinedRef.current = false;
+      // Also reset permission denied flag when call is cleared
+      if (permissionDeniedRef.current) {
+        console.log('🔄 Resetting permissionDeniedRef because incomingMode is null');
+        permissionDeniedRef.current = false;
+      }
     }
     // Also reset if callState goes back to idle (call ended)
     if (callState === 'idle' && hasJoinedRef.current && !incomingMode) {
       console.log('🔄 Resetting hasJoinedRef because callState is idle and no incomingMode');
       hasJoinedRef.current = false;
+      // Also reset permission denied flag
+      if (permissionDeniedRef.current) {
+        console.log('🔄 Resetting permissionDeniedRef because callState is idle');
+        permissionDeniedRef.current = false;
+      }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [incomingMode, callState]); // Note: handleSignal is not in scope here, we rely on handleSignalRef being set by useEffect at line 1535
@@ -1351,19 +1410,29 @@ export default function VideoCall({ currentUser, activeChat, isGroup, incomingMo
       return;
     }
 
-    // This is the critical "Audio Unlock" step for cross-platform audio
-    try {
-      const audio = new Audio('data:audio/wav;base64,UklGRigAAABXQVZFZm10IBIAAAABAAEARKwAAIhYAQACABAAAABkYXRhAgAAAAEA');
-      await audio.play();
-    } catch (e) {
-      console.warn('Dummy audio play failed. Autoplay might not work.', e);
+    // Reset permission denied flag when user manually joins
+    // This allows them to try again after a previous denial
+    if (permissionDeniedRef.current) {
+      console.log('🔄 [JOIN CALL] Resetting permission denied flag for manual retry');
+      permissionDeniedRef.current = false;
     }
 
     if (!callType) return;
     setCallState('calling');
     callStateRef.current = 'calling';
     try {
+      // CRITICAL FOR MOBILE: Call getUserMedia IMMEDIATELY while user gesture is still valid
+      // On mobile browsers (especially iOS Safari), getUserMedia must be called directly
+      // from a user gesture without async delays, otherwise permission will be denied
       const stream = await navigator.mediaDevices.getUserMedia({ video: callType === 'video', audio: true });
+      
+      // Audio unlock can happen after getUserMedia (non-blocking for mobile)
+      try {
+        const audio = new Audio('data:audio/wav;base64,UklGRigAAABXQVZFZm10IBIAAAABAAEARKwAAIhYAQACABAAAABkYXRhAgAAAAEA');
+        audio.play().catch(e => console.warn('Dummy audio play failed. Autoplay might not work.', e));
+      } catch (e) {
+        console.warn('Dummy audio play failed. Autoplay might not work.', e);
+      }
       localStream.current = stream;
       
       // Process stream with background if video call
@@ -1440,7 +1509,15 @@ export default function VideoCall({ currentUser, activeChat, isGroup, incomingMo
       console.error("Failed to get media:", err);
       let errorMessage = "Could not access Camera/Microphone. ";
       if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
-        errorMessage += "Please allow camera/microphone access in your browser settings.";
+        // Mark permission as denied to prevent retry loop
+        permissionDeniedRef.current = true;
+        // Provide mobile-specific instructions
+        const isMobile = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
+        if (isMobile) {
+          errorMessage += "On mobile devices, please:\n1. Tap the button again to grant permission\n2. Make sure you're using HTTPS (required for camera/microphone)\n3. For iOS Safari, try adding the site to your home screen";
+        } else {
+          errorMessage += "Please allow camera/microphone access in your browser settings.";
+        }
       } else if (err.name === 'NotFoundError' || err.name === 'DevicesNotFoundError') {
         errorMessage += "No camera/microphone found. Please connect a device.";
       } else if (err.name === 'NotReadableError' || err.name === 'TrackStartError') {
@@ -2257,11 +2334,21 @@ export default function VideoCall({ currentUser, activeChat, isGroup, incomingMo
                 <span className="ml-2">▼</span>
               </button>
               {showBackgroundSelector && (
-                <div 
-                  className="absolute top-full right-0 mt-2 bg-gray-800 border border-gray-700 rounded-lg p-4 shadow-2xl z-[100000] min-w-[320px] max-w-[400px] max-h-[600px] overflow-y-auto"
-                  onClick={(e) => e.stopPropagation()}
-                  style={{ zIndex: 100000 }}
-                >
+                <>
+                  {/* Backdrop for mobile */}
+                  <div 
+                    className="fixed inset-0 bg-black bg-opacity-50 z-[99999] sm:hidden"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setShowBackgroundSelector(false);
+                    }}
+                    style={{ zIndex: 99999 }}
+                  />
+                  <div 
+                    className="fixed sm:absolute sm:top-full sm:right-0 top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 sm:translate-x-0 sm:translate-y-0 mt-0 sm:mt-2 bg-gray-800 border border-gray-700 rounded-lg p-4 shadow-2xl z-[100000] w-[90vw] max-w-[400px] max-h-[80vh] overflow-y-auto"
+                    onClick={(e) => e.stopPropagation()}
+                    style={{ zIndex: 100000 }}
+                  >
                   <div className="text-white text-sm font-bold mb-3 flex items-center justify-between">
                     <span>Select Background</span>
                     <button
@@ -2341,15 +2428,102 @@ export default function VideoCall({ currentUser, activeChat, isGroup, incomingMo
                       </div>
                     ))}
                   </div>
-                </div>
+                  </div>
+                </>
               )}
             </div>
           </div>
           
           {/* Call Buttons */}
           <div className="flex gap-2 justify-end">
-            <button onClick={() => initiateCall('audio', true)} className="flex items-center gap-2 bg-gray-700 hover:bg-gray-600 px-4 py-2 rounded-full text-white text-sm"><Phone size={18} /></button>
-            <button onClick={() => initiateCall('video', true)} className="flex items-center gap-2 bg-blue-600 hover:bg-blue-500 px-4 py-2 rounded-full text-white text-sm"><VideoIcon size={18} /></button>
+            <button 
+              onClick={(e) => {
+                // CRITICAL FOR MOBILE CHROME: Start getUserMedia in the absolute first statement
+                // No try-catch, no checks - just call it directly and handle errors in .catch()
+                // This ensures the user gesture context is preserved
+                const mediaPromise = navigator.mediaDevices.getUserMedia({ video: false, audio: true });
+                
+                // Handle success
+                mediaPromise.then(async (stream) => {
+                  await initiateCallWithStream('audio', true, stream);
+                }).catch((err: any) => {
+                  console.error("Failed to get media:", err);
+                  
+                  // Handle different error types
+                  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+                    alert("Your browser doesn't support video calling. Please use a modern browser like Chrome, Firefox, Safari, or Edge.");
+                    return;
+                  }
+                  
+                  let errorMessage = "Could not access Microphone. ";
+                  if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
+                    const isMobile = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
+                    const isChrome = /Chrome/i.test(navigator.userAgent);
+                    if (isMobile && isChrome) {
+                      errorMessage += "Permission denied. To fix:\n1. Tap the lock icon in Chrome's address bar\n2. Select 'Site settings'\n3. Allow 'Microphone'\n4. Refresh the page and try again";
+                    } else if (isMobile) {
+                      errorMessage += "On mobile devices:\n1. Make sure you're using HTTPS\n2. Check browser settings to allow microphone access\n3. Try refreshing the page and tapping again";
+                    } else {
+                      errorMessage += "Please allow microphone access in your browser settings.";
+                    }
+                  } else if (err.name === 'NotFoundError' || err.name === 'DevicesNotFoundError') {
+                    errorMessage += "No microphone found. Please connect a device.";
+                  } else if (err.name === 'NotReadableError' || err.name === 'TrackStartError') {
+                    errorMessage += "Device is being used by another application.";
+                  } else {
+                    errorMessage += "Please check permissions and try again.";
+                  }
+                  alert(errorMessage);
+                });
+              }}
+              className="flex items-center gap-2 bg-gray-700 hover:bg-gray-600 px-4 py-2 rounded-full text-white text-sm"
+            >
+              <Phone size={18} />
+            </button>
+            <button 
+              onClick={(e) => {
+                // CRITICAL FOR MOBILE CHROME: Start getUserMedia in the absolute first statement
+                // No try-catch, no checks - just call it directly and handle errors in .catch()
+                // This ensures the user gesture context is preserved
+                const mediaPromise = navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+                
+                // Handle success
+                mediaPromise.then(async (stream) => {
+                  await initiateCallWithStream('video', true, stream);
+                }).catch((err: any) => {
+                  console.error("Failed to get media:", err);
+                  
+                  // Handle different error types
+                  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+                    alert("Your browser doesn't support video calling. Please use a modern browser like Chrome, Firefox, Safari, or Edge.");
+                    return;
+                  }
+                  
+                  let errorMessage = "Could not access Camera/Microphone. ";
+                  if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
+                    const isMobile = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
+                    const isChrome = /Chrome/i.test(navigator.userAgent);
+                    if (isMobile && isChrome) {
+                      errorMessage += "Permission denied. To fix:\n1. Tap the lock icon in Chrome's address bar\n2. Select 'Site settings'\n3. Allow 'Camera' and 'Microphone'\n4. Refresh the page and try again";
+                    } else if (isMobile) {
+                      errorMessage += "On mobile devices:\n1. Make sure you're using HTTPS\n2. Check browser settings to allow camera/microphone access\n3. Try refreshing the page and tapping again";
+                    } else {
+                      errorMessage += "Please allow camera/microphone access in your browser settings.";
+                    }
+                  } else if (err.name === 'NotFoundError' || err.name === 'DevicesNotFoundError') {
+                    errorMessage += "No camera/microphone found. Please connect a device.";
+                  } else if (err.name === 'NotReadableError' || err.name === 'TrackStartError') {
+                    errorMessage += "Device is being used by another application.";
+                  } else {
+                    errorMessage += "Please check permissions and try again.";
+                  }
+                  alert(errorMessage);
+                });
+              }}
+              className="flex items-center gap-2 bg-blue-600 hover:bg-blue-500 px-4 py-2 rounded-full text-white text-sm"
+            >
+              <VideoIcon size={18} />
+            </button>
           </div>
         </div>
       </div>
@@ -2381,11 +2555,21 @@ export default function VideoCall({ currentUser, activeChat, isGroup, incomingMo
                     <ImageIcon size={20} />
                   </button>
                   {showBackgroundSelector && (
-                    <div 
-                      className="absolute top-full right-0 mt-2 bg-gray-800 border border-gray-700 rounded-lg p-3 shadow-2xl z-[100000] min-w-[220px]"
-                      onClick={(e) => e.stopPropagation()}
-                      style={{ zIndex: 100000 }}
-                    >
+                    <>
+                      {/* Backdrop for mobile */}
+                      <div 
+                        className="fixed inset-0 bg-black bg-opacity-50 z-[99999] sm:hidden"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setShowBackgroundSelector(false);
+                        }}
+                        style={{ zIndex: 99999 }}
+                      />
+                      <div 
+                        className="fixed sm:absolute sm:top-full sm:right-0 top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 sm:translate-x-0 sm:translate-y-0 mt-0 sm:mt-2 bg-gray-800 border border-gray-700 rounded-lg p-3 shadow-2xl z-[100000] w-[90vw] max-w-[400px] max-h-[80vh] overflow-y-auto"
+                        onClick={(e) => e.stopPropagation()}
+                        style={{ zIndex: 100000 }}
+                      >
                       <div className="text-white text-sm font-bold mb-3 flex items-center justify-between">
                         <span>Select Background</span>
                         <button
@@ -2466,6 +2650,7 @@ export default function VideoCall({ currentUser, activeChat, isGroup, incomingMo
                         ))}
                       </div>
                     </div>
+                  </>
                   )}
                 </div>
               )}
