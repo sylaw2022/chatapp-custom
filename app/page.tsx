@@ -213,12 +213,12 @@ export default function Home() {
           caller={incomingCall.caller}
           callType={incomingCall.callType}
           onAccept={acceptCall}
-          onReject={() => {
+          onReject={async () => {
             // Send rejection signal to caller before clearing local state
             if (incomingCall?.caller?.id) {
               // Extract roomId from incomingCall payload if available
               const roomId = (incomingCall as any).roomId
-              rejectCall(incomingCall.caller.id, roomId)
+              await rejectCall(incomingCall.caller.id, roomId)
             } else {
               // Fallback: just clear local state if caller info not available
               setIncomingCall(null)

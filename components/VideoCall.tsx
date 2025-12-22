@@ -39,21 +39,52 @@ interface VideoCallProps {
 const VideoPlayer = ({ peer }: { peer: Peer }) => {
   const videoRef = useRef<HTMLVideoElement>(null);
   const audioRef = useRef<HTMLAudioElement>(null);
+  const trackCountRef = useRef<{ video: number; audio: number }>({ video: 0, audio: 0 });
 
   useEffect(() => {
-    if (videoRef.current && peer.stream) {
-      videoRef.current.srcObject = peer.stream;
+    if (!peer.stream) return;
+    
+    // Track the number of tracks to detect changes even if stream reference doesn't change
+    const videoTracks = peer.stream.getVideoTracks();
+    const audioTracks = peer.stream.getAudioTracks();
+    const currentTrackCount = { video: videoTracks.length, audio: audioTracks.length };
+    
+    // Check if tracks changed
+    const tracksChanged = 
+      trackCountRef.current.video !== currentTrackCount.video ||
+      trackCountRef.current.audio !== currentTrackCount.audio;
+    
+    if (tracksChanged) {
+      console.log(`📹 VideoPlayer: Tracks changed for peer ${peer.id}`, {
+        video: `${trackCountRef.current.video} -> ${currentTrackCount.video}`,
+        audio: `${trackCountRef.current.audio} -> ${currentTrackCount.audio}`
+      });
+      trackCountRef.current = currentTrackCount;
+    }
+    
+    // Update video element
+    if (videoRef.current) {
+      // Always update srcObject to ensure it reflects current stream state
+      if (videoRef.current.srcObject !== peer.stream) {
+        videoRef.current.srcObject = peer.stream;
+        console.log(`📹 VideoPlayer: Updated video srcObject for peer ${peer.id}`);
+      }
       // Force video to play
       videoRef.current.play().catch(e => console.warn('Video play failed:', e));
     }
+    
     // CRITICAL: Add audio element for remote streams to hear audio
-    if (!peer.isLocal && audioRef.current && peer.stream) {
-      audioRef.current.srcObject = peer.stream;
+    if (!peer.isLocal && audioRef.current) {
+      // Always update srcObject to ensure it reflects current stream state
+      if (audioRef.current.srcObject !== peer.stream) {
+        audioRef.current.srcObject = peer.stream;
+        console.log(`🔊 VideoPlayer: Updated audio srcObject for remote peer ${peer.id}`);
+      }
       // Ensure audio is not muted and force play
       audioRef.current.muted = false;
       audioRef.current.volume = 1.0;
       audioRef.current.play().catch(e => console.warn('Audio play failed:', e));
-      console.log(`Audio element set for remote peer ${peer.id}, tracks:`, peer.stream.getAudioTracks().length);
+      console.log(`Audio element set for remote peer ${peer.id}, tracks:`, audioTracks.length);
     }
   }, [peer.stream, peer.isLocal, peer.id]);
 
@@ -134,6 +165,7 @@ export default function VideoCall({ currentUser, activeChat, isGroup, incomingMo
   const pendingOffers = useRef<Set<number>>(new Set()); // Track peers we're creating offers for
   const hasJoinedRef = useRef<boolean>(false); // Track if we've already joined to prevent re-joining
   const currentUserRef = useRef<User>(currentUser); // Store currentUser in ref for cleanup
+  const leaveSignalProcessedRef = useRef<Set<number>>(new Set()); // Track processed leave signals to prevent duplicates
   const supabase = createClient();
   
   // Keep currentUserRef in sync
@@ -362,11 +394,100 @@ export default function VideoCall({ currentUser, activeChat, isGroup, incomingMo
 
   // --- CORE LOGIC: CLEANUP ---
   const cleanup = useCallback(async (isLeaving: boolean) => {
+    console.log('🧹 Starting cleanup, isLeaving:', isLeaving);
+    
     if (isLeaving && channelRef.current) {
       try {
-        await channelRef.current.send({ type: 'broadcast', event: 'signal', payload: { type: 'leave', senderId: currentUser.id } });
+        // Check channel state before sending
+        const channelState = channelRef.current.state;
+        const channelName = channelRef.current.topic || 'unknown';
+        console.log('📤 [SENDER] Preparing to send leave signal');
+        console.log('📤 [SENDER] Channel state:', channelState);
+        console.log('📤 [SENDER] Channel name/topic:', channelName);
+        console.log('📤 [SENDER] RoomId:', roomId);
+        console.log('📤 [SENDER] Current user ID:', currentUser.id);
+        
+        const leavePayload = { type: 'leave', senderId: currentUser.id };
+        console.log('📤 [SENDER] Leave payload:', leavePayload);
+        
+        // Try to send regardless of state - sometimes it works even if not SUBSCRIBED
+        try {
+          console.log('📤 [SENDER] Attempting to send leave signal...');
+          await channelRef.current.send({ 
+            type: 'broadcast', 
+            event: 'signal', 
+            payload: leavePayload 
+          });
+          console.log('✅ [SENDER] Leave signal sent successfully');
+          
+          // Wait a bit to ensure the signal is delivered before removing the channel
+          // This gives the receiver time to receive and process the leave signal
+          await new Promise(resolve => setTimeout(resolve, 500));
+          
+          console.log('✅ [SENDER] Wait completed, removing channel');
+        } catch (sendError) {
+          console.error('❌ [SENDER] Failed to send leave signal:', sendError);
+          // If channel is not subscribed, try to subscribe first
+          if (channelState !== 'SUBSCRIBED') {
+            console.log('⚠️ [SENDER] Channel not subscribed, attempting to subscribe...');
+            try {
+              await new Promise((resolve, reject) => {
+                const timeout = setTimeout(() => reject(new Error('Subscription timeout')), 2000);
+                channelRef.current!.subscribe((status: string) => {
+                  console.log('📡 [SENDER] Subscription status:', status);
+                  if (status === 'SUBSCRIBED') {
+                    clearTimeout(timeout);
+                    resolve(null);
+                  } else if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') {
+                    clearTimeout(timeout);
+                    reject(new Error(`Subscription failed: ${status}`));
+                  }
+                });
+              });
+              
+              // Now try sending again
+              console.log('📤 [SENDER] Retrying leave signal after subscription...');
+              await channelRef.current.send({ 
+                type: 'broadcast', 
+                event: 'signal', 
+                payload: leavePayload 
+              });
+              console.log('✅ [SENDER] Leave signal sent after subscription');
+              await new Promise(resolve => setTimeout(resolve, 500));
+            } catch (retryError) {
+              console.error('❌ [SENDER] Failed to send leave signal after subscription retry:', retryError);
+            }
+          }
+        }
+        
+        console.log('🧹 [SENDER] Removing channel');
         await supabase.removeChannel(channelRef.current);
-      } catch (e) { console.error("Error during cleanup send/remove:", e) }
+        console.log('✅ [SENDER] Channel removed');
+      } catch (e) { 
+        console.error("❌ [SENDER] Error during cleanup send/remove:", e);
+        // Still try to remove channel even if send failed
+        try {
+          await supabase.removeChannel(channelRef.current);
+        } catch (removeError) {
+          console.error("❌ [SENDER] Error removing channel:", removeError);
+        }
+      }
+    } else if (isLeaving) {
+      console.warn('⚠️ [SENDER] Cannot send leave signal: channelRef.current is null');
+    }
+    
+    // Remove channel if it exists (for both sender and receiver)
+    if (channelRef.current && !isLeaving) {
+      // Receiver cleanup - remove channel without sending leave signal
+      try {
+        console.log('🧹 [RECEIVER] Removing channel during cleanup');
+        await supabase.removeChannel(channelRef.current);
+        console.log('✅ [RECEIVER] Channel removed');
+        channelRef.current = null; // Clear the ref after removal
+      } catch (e) {
+        console.error('❌ [RECEIVER] Error removing channel:', e);
+        channelRef.current = null; // Clear the ref even if removal failed
+      }
     }
     
     // Cleanup notification channel
@@ -380,6 +501,17 @@ export default function VideoCall({ currentUser, activeChat, isGroup, incomingMo
         await supabase.removeChannel(notifyChannelRef.current);
       } catch (e) { console.error("Error removing notification channel:", e) }
       notifyChannelRef.current = null;
+    }
+    
+    // CRITICAL: Clean up window event listener for call-rejected
+    if (senderNotificationChannelRef.current) {
+      const handler = (senderNotificationChannelRef.current as any)?.rejectionHandler;
+      if (handler) {
+        console.log('🧹 Removing window event listener for call-rejected');
+        window.removeEventListener('call-rejected', handler as EventListener);
+        (senderNotificationChannelRef.current as any).rejectionHandler = null;
+      }
+      senderNotificationChannelRef.current = null;
     }
     
     channelRef.current = null;
@@ -429,7 +561,13 @@ export default function VideoCall({ currentUser, activeChat, isGroup, incomingMo
     peerConnections.current.clear();
     iceCandidateQueue.current.clear();
     pendingOffers.current.clear();
+    leaveSignalProcessedRef.current.clear(); // Clear processed leave signals
     hasJoinedRef.current = false; // Reset join flag
+    
+    // DON'T clear handleSignalRef here - it will be set by useEffect when handleSignal changes
+    // Clearing it can cause issues if a new call starts before the useEffect runs
+    // The useEffect at line 1707 will keep it updated, and initiateCall will set it if needed
+    // handleSignalRef.current = null; // REMOVED - let useEffect manage this
     
     // Reset state
     setPeers(new Map());
@@ -441,7 +579,7 @@ export default function VideoCall({ currentUser, activeChat, isGroup, incomingMo
     
     console.log('✅ All cleanup completed, calling onCallEnd');
     onCallEnd(); // Notify parent to reset state
-  }, [currentUser.id, supabase, onCallEnd, callState, callType]);
+  }, [currentUser.id, supabase, onCallEnd]);
 
   // --- BACKGROUND PROCESSING ---
   const processVideoWithBackground = useCallback(async (stream: MediaStream, backgroundId: string): Promise<MediaStream> => {
@@ -630,6 +768,15 @@ export default function VideoCall({ currentUser, activeChat, isGroup, incomingMo
       return;
     }
     
+    // CRITICAL: Ensure handleSignalRef is set BEFORE starting the call
+    // This prevents issues where signals arrive before the ref is set
+    if (!handleSignalRef.current) {
+      console.log('🔄 [INITIATE CALL] handleSignalRef is null, setting it now');
+      handleSignalRef.current = handleSignal;
+    } else {
+      console.log('✅ [INITIATE CALL] handleSignalRef is already set');
+    }
+    
     setCallType(type);
     setCallState('calling'); // Start calling immediately, no prompting
     callStateRef.current = 'calling';
@@ -771,6 +918,14 @@ export default function VideoCall({ currentUser, activeChat, isGroup, incomingMo
 
       const channel = supabase.channel(roomId);
       channelRef.current = channel;
+      console.log('📡 [SENDER] Created channel with roomId:', roomId);
+
+      // CRITICAL: Ensure handleSignalRef is set before setting up channel handlers
+      // This prevents race condition where handlers are set up before handleSignal is available
+      if (!handleSignalRef.current) {
+        console.warn('⚠️ handleSignalRef is null in initiateCall, setting it now');
+        handleSignalRef.current = handleSignal;
+      }
 
       // Listen for rejection signal on room channel
       channel.on('broadcast', { event: 'call-rejected' }, ({ payload }) => {
@@ -790,13 +945,19 @@ export default function VideoCall({ currentUser, activeChat, isGroup, incomingMo
 
       channel
         .on('broadcast', { event: 'signal' }, ({ payload }) => {
+          console.log('📨 [RECEIVER] Signal received on channel:', payload.type, 'from:', payload.senderId, 'channel state:', channel.state);
           // Use ref to access handleSignal to avoid dependency issues
           if (handleSignalRef.current) {
+            console.log('✅ [RECEIVER] Calling handleSignal for signal type:', payload.type);
             handleSignalRef.current(payload, channel);
+          } else {
+            console.error('❌ handleSignalRef is null when signal received! This should not happen.');
           }
         })
         .subscribe((status) => {
+          console.log('📡 [RECEIVER] Channel subscription status:', status, 'roomId:', roomId);
           if (status === 'SUBSCRIBED') {
+            console.log('✅ [RECEIVER] Channel subscribed, sending join signal');
             channel.send({ type: 'broadcast', event: 'signal', payload: { type: 'join', senderId: currentUser.id, user: currentUser } });
           }
         });
@@ -878,17 +1039,66 @@ export default function VideoCall({ currentUser, activeChat, isGroup, incomingMo
 
           const channel = supabase.channel(roomId);
           channelRef.current = channel;
+          console.log('📡 [RECEIVER AUTO-JOIN] Created channel with roomId:', roomId);
+
+          // CRITICAL: Ensure handleSignalRef is set before setting up channel handlers
+          // Try to get handleSignal from the component scope first
+          // If not available, wait for it to be set by useEffect
+          if (!handleSignalRef.current) {
+            console.warn('⚠️ handleSignalRef is null in auto-join, waiting for it...');
+            let retries = 0;
+            while (!handleSignalRef.current && retries < 20) {
+              await new Promise(resolve => setTimeout(resolve, 50));
+              retries++;
+            }
+            
+            // If still null after waiting, try to set it directly if handleSignal is available
+            // Note: handleSignal might not be in scope here, so we rely on the useEffect
+            if (!handleSignalRef.current) {
+              console.error('❌ handleSignalRef is still null after waiting! This is a critical error.');
+              console.error('❌ This usually means handleSignal useEffect has not run yet. Component may need to re-render.');
+              // Don't fail completely - set up handler with a check
+              // The useEffect should set it soon
+            }
+          }
+
+          if (handleSignalRef.current) {
+            console.log('✅ handleSignalRef is ready in auto-join');
+          } else {
+            console.warn('⚠️ handleSignalRef is still null, but continuing - will check again when signal arrives');
+          }
 
           // Use a ref to access handleSignal to avoid dependency issues
           channel
             .on('broadcast', { event: 'signal' }, ({ payload }) => {
+              console.log('📨 [RECEIVER AUTO-JOIN] Signal received on channel:', payload.type, 'from:', payload.senderId, 'channel state:', channel.state);
               // Use ref to access handleSignal to avoid dependency issues
               if (handleSignalRef.current) {
+                console.log('✅ [RECEIVER AUTO-JOIN] Calling handleSignal for signal type:', payload.type);
                 handleSignalRef.current(payload, channel);
+              } else {
+                console.error('❌ handleSignalRef is null when signal received in auto-join! This should not happen.');
+                // Try to wait a bit and retry - the useEffect might set it soon
+                console.log('⏳ Waiting for handleSignalRef to be set...');
+                let retries = 0;
+                const checkAndProcess = () => {
+                  if (handleSignalRef.current) {
+                    console.log('✅ handleSignalRef is now available, processing signal');
+                    handleSignalRef.current(payload, channel);
+                  } else if (retries < 10) {
+                    retries++;
+                    setTimeout(checkAndProcess, 50);
+                  } else {
+                    console.error('❌ handleSignalRef is still null after retries. Signal may be lost:', payload.type);
+                  }
+                };
+                setTimeout(checkAndProcess, 50);
               }
             })
             .subscribe((status) => {
+              console.log('📡 [RECEIVER AUTO-JOIN] Channel subscription status:', status, 'roomId:', roomId);
               if (status === 'SUBSCRIBED') {
+                console.log('✅ [RECEIVER AUTO-JOIN] Channel subscribed, sending join signal');
                 channel.send({ type: 'broadcast', event: 'signal', payload: { type: 'join', senderId: currentUser.id, user: currentUser } });
               }
             });
@@ -922,7 +1132,7 @@ export default function VideoCall({ currentUser, activeChat, isGroup, incomingMo
       hasJoinedRef.current = false;
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [incomingMode, callState]); // Include callState to ensure we can re-join if needed
+  }, [incomingMode, callState]); // Note: handleSignal is not in scope here, we rely on handleSignalRef being set by useEffect at line 1535
 
   // --- CORE LOGIC: JOIN CALL (AFTER USER CLICK) ---
   const joinCall = useCallback(async () => {
@@ -976,6 +1186,13 @@ export default function VideoCall({ currentUser, activeChat, isGroup, incomingMo
 
       const channel = supabase.channel(roomId);
       channelRef.current = channel;
+      console.log('📡 [RECEIVER JOIN] Created channel with roomId:', roomId);
+
+      // CRITICAL: Ensure handleSignalRef is set before setting up channel handlers
+      if (!handleSignalRef.current) {
+        console.warn('⚠️ handleSignalRef is null in joinCall, setting it now');
+        handleSignalRef.current = handleSignal;
+      }
 
       // Listen for rejection signal on room channel
       channel.on('broadcast', { event: 'call-rejected' }, ({ payload }) => {
@@ -995,13 +1212,19 @@ export default function VideoCall({ currentUser, activeChat, isGroup, incomingMo
 
       channel
         .on('broadcast', { event: 'signal' }, ({ payload }) => {
+          console.log('📨 [RECEIVER JOIN] Signal received on channel:', payload.type, 'from:', payload.senderId, 'channel state:', channel.state);
           // Use ref to access handleSignal to avoid dependency issues
           if (handleSignalRef.current) {
+            console.log('✅ [RECEIVER JOIN] Calling handleSignal for signal type:', payload.type);
             handleSignalRef.current(payload, channel);
+          } else {
+            console.error('❌ handleSignalRef is null when signal received in joinCall! This should not happen.');
           }
         })
         .subscribe((status) => {
+          console.log('📡 [RECEIVER JOIN] Channel subscription status:', status, 'roomId:', roomId);
           if (status === 'SUBSCRIBED') {
+            console.log('✅ [RECEIVER JOIN] Channel subscribed, sending join signal');
             channel.send({ type: 'broadcast', event: 'signal', payload: { type: 'join', senderId: currentUser.id, user: currentUser } });
           }
         });
@@ -1034,9 +1257,30 @@ export default function VideoCall({ currentUser, activeChat, isGroup, incomingMo
     };
     
     pc.ontrack = e => {
-      console.log(`Received track from ${remoteId}:`, e.track.kind, e.streams, 'Track enabled:', e.track.enabled);
-      // Handle all streams - merge tracks if multiple streams exist
-      const remoteStream = e.streams[0] || new MediaStream();
+      console.log(`📥 Received track from ${remoteId}:`, {
+        kind: e.track.kind,
+        id: e.track.id,
+        enabled: e.track.enabled,
+        readyState: e.track.readyState,
+        streams: e.streams.length,
+        streamIds: e.streams.map(s => s.id)
+      });
+      
+      // Aggregate all tracks from all streams in the event
+      const allTracks: MediaStreamTrack[] = [];
+      e.streams.forEach(stream => {
+        stream.getTracks().forEach(track => {
+          allTracks.push(track);
+        });
+      });
+      
+      // Also add the track from the event itself (in case it's not in streams)
+      if (e.track && !allTracks.find(t => t.id === e.track.id)) {
+        allTracks.push(e.track);
+      }
+      
+      console.log(`📥 Aggregated ${allTracks.length} tracks from event for ${remoteId}:`, 
+        allTracks.map(t => `${t.kind}:${t.id}`));
       
       // If we already have a peer for this remoteId, merge tracks
       setPeers(prev => {
@@ -1044,43 +1288,81 @@ export default function VideoCall({ currentUser, activeChat, isGroup, incomingMo
         const wasEmpty = prev.size === 0 || (prev.size === 1 && prev.has(currentUser.id));
         
         if (existing && existing.stream) {
-          // Merge tracks from new stream into existing stream
-          let tracksAdded = false;
-          e.streams.forEach(stream => {
-            stream.getTracks().forEach(track => {
-              // Check if track already exists
-              const existingTrack = existing.stream.getTracks().find(
-                t => t.id === track.id || (t.kind === track.kind && t.label === track.label)
-              );
-              if (!existingTrack) {
-                existing.stream.addTrack(track);
-                tracksAdded = true;
-                console.log(`Added ${track.kind} track to existing stream for ${remoteId}`);
-              }
+          // Check which tracks are new
+          const existingTrackIds = new Set(existing.stream.getTracks().map(t => t.id));
+          const newTracks = allTracks.filter(track => !existingTrackIds.has(track.id));
+          
+          if (newTracks.length > 0) {
+            console.log(`➕ Adding ${newTracks.length} new tracks to existing stream for ${remoteId}:`, 
+              newTracks.map(t => `${t.kind}:${t.id}`));
+            
+            // Create a NEW MediaStream with all tracks (old + new) to trigger React update
+            const updatedStream = new MediaStream();
+            
+            // Add all existing tracks
+            existing.stream.getTracks().forEach(track => {
+              updatedStream.addTrack(track);
             });
-          });
-          // Return new Map to trigger re-render if tracks were added
-          if (tracksAdded) {
-            const newPeers = new Map(prev).set(remoteId, { ...existing, stream: existing.stream });
+            
+            // Add all new tracks
+            newTracks.forEach(track => {
+              updatedStream.addTrack(track);
+              console.log(`✅ Added ${track.kind} track (${track.id}) to stream for ${remoteId}`);
+            });
+            
+            console.log(`📊 Updated stream for ${remoteId} now has:`, {
+              video: updatedStream.getVideoTracks().length,
+              audio: updatedStream.getAudioTracks().length,
+              total: updatedStream.getTracks().length
+            });
+            
+            // Create new peer entry with new stream reference to trigger React update
+            const newPeers = new Map(prev).set(remoteId, { 
+              ...existing, 
+              stream: updatedStream // NEW stream reference
+            });
+            
             // Update call state to active when first remote track is received
             if (wasEmpty) {
-              console.log('Updating callState to active after receiving first remote track');
+              console.log('✅ Updating callState to active after receiving first remote track');
               setCallState('active');
               callStateRef.current = 'active';
             }
+            
             return newPeers;
+          } else {
+            console.log(`⚠️ No new tracks to add for ${remoteId} (all ${allTracks.length} tracks already exist)`);
+            return prev;
           }
-          return prev;
         } else {
-          // Create new peer entry
-          console.log(`Creating new peer entry for ${remoteId} with stream tracks:`, remoteStream.getTracks().map(t => t.kind));
-          const newPeers = new Map(prev).set(remoteId, { id: remoteId, stream: remoteStream, user, isLocal: false });
+          // Create new peer entry with a new stream containing all tracks
+          const newStream = new MediaStream();
+          allTracks.forEach(track => {
+            newStream.addTrack(track);
+            console.log(`✅ Added ${track.kind} track (${track.id}) to new stream for ${remoteId}`);
+          });
+          
+          console.log(`🆕 Creating new peer entry for ${remoteId} with stream:`, {
+            video: newStream.getVideoTracks().length,
+            audio: newStream.getAudioTracks().length,
+            total: newStream.getTracks().length,
+            trackIds: newStream.getTracks().map(t => `${t.kind}:${t.id}`)
+          });
+          
+          const newPeers = new Map(prev).set(remoteId, { 
+            id: remoteId, 
+            stream: newStream, 
+            user, 
+            isLocal: false 
+          });
+          
           // Update call state to active when first remote peer is added
           if (wasEmpty) {
-            console.log('Updating callState to active after adding first remote peer');
+            console.log('✅ Updating callState to active after adding first remote peer');
             setCallState('active');
             callStateRef.current = 'active';
           }
+          
           return newPeers;
         }
       });
@@ -1088,13 +1370,33 @@ export default function VideoCall({ currentUser, activeChat, isGroup, incomingMo
     
     // Connection state monitoring
     pc.onconnectionstatechange = () => {
-      console.log(`Connection state for ${remoteId}:`, pc.connectionState);
+      console.log(`[RECEIVER] Connection state for ${remoteId}:`, pc.connectionState);
       if (pc.connectionState === 'failed' || pc.connectionState === 'disconnected' || pc.connectionState === 'closed') {
-        console.warn(`Connection ${pc.connectionState} for peer ${remoteId}`);
-        // Log but don't auto-cleanup - let periodic monitoring handle it
+        console.warn(`[RECEIVER] Connection ${pc.connectionState} for peer ${remoteId}`);
+        
+        // FALLBACK: If connection is closed and we're in an active call, the other user likely ended the call
+        // Only trigger this if we're in 'active' state (not during initial connection)
+        // and this is the caller (remoteId matches activeChat.id)
+        if (pc.connectionState === 'closed' && callStateRef.current === 'active' && !isGroup && activeChat && remoteId === activeChat.id) {
+          console.log('📞 [RECEIVER FALLBACK] Peer connection closed - caller likely ended the call');
+          // Use a flag to prevent duplicate alerts if leave signal arrives
+          const connectionClosedRef = { handled: false };
+          
+          setTimeout(() => {
+            // Double-check that we still don't have this peer (leave signal would have removed it)
+            // and that we haven't already handled this
+            if (!connectionClosedRef.handled && !peerConnections.current.has(remoteId) && callStateRef.current !== 'idle') {
+              console.log('📞 [RECEIVER FALLBACK] Showing alert for connection closed');
+              connectionClosedRef.handled = true;
+              alert("The other user has ended the call.");
+              cleanup(false);
+            }
+          }, 1000);
+        }
+        // Log but don't auto-cleanup immediately - let periodic monitoring or leave signal handle it
         // This prevents premature cleanup during normal connection establishment
       } else if (pc.connectionState === 'connected') {
-        console.log(`Successfully connected to peer ${remoteId}`);
+        console.log(`[RECEIVER] Successfully connected to peer ${remoteId}`);
         // Update call state to active when connection is established
         setCallState(prev => {
           if (prev !== 'active') {
@@ -1135,11 +1437,15 @@ export default function VideoCall({ currentUser, activeChat, isGroup, incomingMo
     });
     
     return pc;
-  }, [currentUser.id]);
+  }, [currentUser.id, isGroup, activeChat]);
   
   const handleSignal = useCallback(async (payload: any, channel: any) => {
     const { type, senderId, targetId, sdp, candidate, user } = payload;
-    if (senderId === currentUser.id) return;
+    console.log('🔔 [handleSignal] Processing signal:', type, 'from:', senderId, 'to:', targetId, 'currentUser:', currentUser.id);
+    if (senderId === currentUser.id) {
+      console.log('⏭️ [handleSignal] Ignoring signal from self');
+      return;
+    }
 
     let pc = peerConnections.current.get(senderId);
 
@@ -1369,24 +1675,90 @@ export default function VideoCall({ currentUser, activeChat, isGroup, incomingMo
           }
           break;
         case 'leave':
+          // Prevent duplicate processing of the same leave signal
+          if (leaveSignalProcessedRef.current.has(senderId)) {
+            console.log('⏭️ [RECEIVER] Leave signal already processed for', senderId, '- ignoring duplicate');
+            return;
+          }
+          
+          console.log('📨 [RECEIVER] Received leave signal from:', senderId, 'Current callState:', callState, 'activeChat.id:', activeChat?.id, 'isGroup:', isGroup);
+          
+          // Mark as processed immediately to prevent duplicates
+          leaveSignalProcessedRef.current.add(senderId);
+          
+          // Close peer connection for the leaving user
           if (peerConnections.current.has(senderId)) {
+            console.log('🔌 [RECEIVER] Closing peer connection for', senderId);
             peerConnections.current.get(senderId)?.close();
             peerConnections.current.delete(senderId);
           }
+          
+          // Remove peer from state
           setPeers(prev => {
             const newPeers = new Map(prev);
-            newPeers.delete(senderId);
+            if (newPeers.has(senderId)) {
+              console.log('🗑️ [RECEIVER] Removing peer from state:', senderId);
+              newPeers.delete(senderId);
+            }
             return newPeers;
           });
+          
           if (!isGroup) {
-            // If we're in 'calling' state and receiver leaves, they rejected the call
-            if (callState === 'calling' && senderId === activeChat.id) {
-              console.log('❌ Receiver rejected the call');
-              alert("The call was rejected.");
+            // Determine if this is the caller (sender) or receiver ending the call
+            // If senderId matches activeChat.id, it means the caller (the person we're chatting with) ended the call
+            const isCallerEnding = senderId === activeChat.id;
+            
+            console.log('📞 [RECEIVER] Processing leave signal - isCallerEnding:', isCallerEnding, 'callState:', callState);
+            
+            // Show alert synchronously - alert() is blocking and will wait for user to click OK
+            // This ensures the alert is displayed before any cleanup happens
+            if (isCallerEnding) {
+              console.log('📞 [RECEIVER] Caller ended the call - showing alert');
+              try {
+                // Call alert synchronously - it will block until user clicks OK
+                alert("The other user has ended the call.");
+                console.log('✅ [RECEIVER] Alert acknowledged by user');
+              } catch (err) {
+                console.error('❌ [RECEIVER] Error showing alert:', err);
+              }
+              
+              // Cleanup after alert is acknowledged (alert is blocking, so this runs after user clicks OK)
+              console.log('🧹 [RECEIVER] Starting cleanup after alert');
+              console.log('🧹 [RECEIVER] Pre-cleanup state:', {
+                callState: callState,
+                callStateRef: callStateRef.current,
+                peersSize: peers.size,
+                peerConnectionsSize: peerConnections.current.size,
+                hasLocalStream: !!localStream.current,
+                hasChannel: !!channelRef.current,
+                hasProcessedStream: !!processedStreamRef.current
+              });
+              cleanup(false).then(() => {
+                console.log('✅ [RECEIVER] Cleanup completed after leave signal');
+                console.log('✅ [RECEIVER] Post-cleanup state:', {
+                  callState: callState,
+                  callStateRef: callStateRef.current,
+                  peersSize: peers.size,
+                  peerConnectionsSize: peerConnections.current.size,
+                  hasLocalStream: !!localStream.current,
+                  hasChannel: !!channelRef.current,
+                  hasProcessedStream: !!processedStreamRef.current
+                });
+              }).catch(err => console.error('❌ [RECEIVER] Error during cleanup after leave:', err));
             } else {
-              alert("The other user has ended the call.");
+              // This shouldn't happen in direct calls, but handle it anyway
+              console.log('⚠️ [RECEIVER] Unexpected leave signal from non-caller');
+              try {
+                alert("The other user has ended the call.");
+                console.log('✅ [RECEIVER] Alert acknowledged by user');
+              } catch (err) {
+                console.error('❌ [RECEIVER] Error showing alert:', err);
+              }
+              cleanup(false).catch(err => console.error('Error during cleanup after leave:', err));
             }
-            await cleanup(false);
+          } else {
+            // For groups, just log the leave
+            console.log('👋 [RECEIVER] User left the group call:', senderId);
           }
           break;
       }
@@ -1398,7 +1770,7 @@ export default function VideoCall({ currentUser, activeChat, isGroup, incomingMo
         await cleanup(false);
       }
     }
-  }, [currentUser.id, isGroup, createPeer, cleanup]);
+  }, [currentUser.id, isGroup, activeChat, createPeer, cleanup]);
 
   // Update ref when handleSignal changes
   useEffect(() => {

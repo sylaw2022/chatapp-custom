@@ -54,8 +54,6 @@ export default function ChatWindow({ user, activeChat, isGroup, acceptedCallMode
     if (!activeChat || loadingChat) return
     
     const markAsRead = async () => {
-      console.log('📖 Marking messages as read for chat:', activeChat.id, 'isGroup:', isGroup)
-      
       if (isGroup) {
         // For groups: Mark messages sent by current user as read (when others read them)
         const { data, error } = await supabase
@@ -70,7 +68,6 @@ export default function ChatWindow({ user, activeChat, isGroup, acceptedCallMode
         if (error) {
           console.error('❌ Error marking group messages as read:', error)
         } else {
-          console.log('✅ Marked group messages as read:', data?.length || 0, 'messages')
           // Update local state immediately for instant UI update
           if (data && data.length > 0) {
             setMessages(prev => prev.map(m => 
@@ -96,7 +93,6 @@ export default function ChatWindow({ user, activeChat, isGroup, acceptedCallMode
         if (receivedError) {
           console.error('❌ Error marking received messages as read:', receivedError)
         } else {
-          console.log('✅ Marked received messages as read:', receivedData?.length || 0, 'messages')
           // Update local state immediately - mark ALL received messages as read
           setMessages(prev => prev.map(m => 
             m.sender_id === activeChat.id && m.recipient_id === user.id
