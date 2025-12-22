@@ -156,6 +156,8 @@ export default function VideoCall({ currentUser, activeChat, isGroup, incomingMo
   const animationFrameRef = useRef<number | null>(null);
   const backgroundImageRef = useRef<HTMLImageElement | null>(null);
   const backgroundSelectorRef = useRef<HTMLDivElement | null>(null);
+  const selfieSegmentationRef = useRef<any | null>(null);
+  const latestSegmentationResultsRef = useRef<any | null>(null); // Store latest segmentation results
   const peerConnections = useRef<Map<number, RTCPeerConnection>>(new Map());
   const channelRef = useRef<any>(null);
   const notifyChannelRef = useRef<any>(null);
@@ -523,7 +525,19 @@ export default function VideoCall({ currentUser, activeChat, isGroup, incomingMo
     
     // Cleanup video element and canvas
     if (videoElementRef.current) {
-      videoElementRef.current.srcObject = null;
+      try {
+        // Stop processing if it's still active
+        const stopProcessing = (videoElementRef.current as any)?._stopProcessing;
+        if (stopProcessing && typeof stopProcessing === 'function') {
+          stopProcessing();
+        }
+        // Pause and clear video element before nulling
+        videoElementRef.current.pause();
+        videoElementRef.current.srcObject = null;
+        videoElementRef.current.load(); // Reset video element
+      } catch (e) {
+        // Ignore errors during cleanup
+      }
       videoElementRef.current = null;
     }
     if (canvasRef.current) {
@@ -592,9 +606,78 @@ export default function VideoCall({ currentUser, activeChat, isGroup, incomingMo
 
     // Stop any existing processing
     if (animationFrameRef.current) {
+      console.log('🛑 Stopping existing animation frame before starting new processing');
       cancelAnimationFrame(animationFrameRef.current);
       animationFrameRef.current = null;
     }
+    
+    // Also stop processing if there's an old video element with stopProcessing function
+    if (videoElementRef.current && (videoElementRef.current as any)._stopProcessing) {
+      console.log('🛑 Stopping old processing session before starting new one');
+      try {
+        (videoElementRef.current as any)._stopProcessing();
+      } catch (e) {
+        // Ignore errors - old processing might already be stopped
+      }
+    }
+
+    // Initialize MediaPipe Selfie Segmentation if not already initialized
+    // Wait for initialization to complete before proceeding
+    if (!selfieSegmentationRef.current) {
+      console.log('🤖 Initializing MediaPipe Selfie Segmentation...');
+      try {
+        const mediapipeModule = await import('@mediapipe/selfie_segmentation');
+        console.log('📦 MediaPipe module loaded, available exports:', Object.keys(mediapipeModule));
+        
+        // Try different possible export patterns
+        const SelfieSegmentation = 
+          (mediapipeModule as any).SelfieSegmentation || 
+          (mediapipeModule as any).default?.SelfieSegmentation || 
+          (mediapipeModule as any).default;
+        
+        if (SelfieSegmentation && typeof SelfieSegmentation === 'function') {
+          selfieSegmentationRef.current = new SelfieSegmentation({
+            locateFile: (file: string) => {
+              return `https://cdn.jsdelivr.net/npm/@mediapipe/selfie_segmentation/${file}`;
+            }
+          });
+          
+          selfieSegmentationRef.current.setOptions({
+            modelSelection: 1, // 0 for general, 1 for landscape (better for video calls)
+          });
+          
+          // Initialize MediaPipe
+          await selfieSegmentationRef.current.initialize();
+          
+          // Set up the results callback ONCE when MediaPipe is initialized
+          // This callback will persist across multiple calls
+          selfieSegmentationRef.current.onResults((results: any) => {
+            latestSegmentationResultsRef.current = results;
+            console.log('📊 [MediaPipe] Received segmentation results, mask available:', !!results?.segmentationMask);
+          });
+          
+          console.log('✅ MediaPipe Selfie Segmentation initialized and ready with callback set up');
+        } else {
+          console.error('❌ SelfieSegmentation class not found in module');
+          console.log('📦 Module structure:', mediapipeModule);
+        }
+      } catch (error) {
+        console.error('❌ Failed to load MediaPipe module:', error);
+        // Continue without segmentation - will draw video on top of background
+      }
+    } else {
+      // MediaPipe already initialized - ensure callback is set up
+      // Always re-register the callback to ensure it's active for this processing session
+      // MediaPipe's onResults can be called multiple times and will update the callback
+      console.log('🔄 Ensuring MediaPipe results callback is set up for new call');
+      selfieSegmentationRef.current.onResults((results: any) => {
+        latestSegmentationResultsRef.current = results;
+        console.log('📊 [MediaPipe] Received segmentation results, mask available:', !!results?.segmentationMask);
+      });
+    }
+    
+    // Reset results for new processing session
+    latestSegmentationResultsRef.current = null;
 
     const video = document.createElement('video');
     video.srcObject = stream;
@@ -648,12 +731,24 @@ export default function VideoCall({ currentUser, activeChat, isGroup, incomingMo
       console.log('📷 Loading background image from URL:', backgroundOption.url);
       bgImage = new Image();
       bgImage.crossOrigin = 'anonymous';
+      
+      // Store in ref for potential reuse
+      backgroundImageRef.current = bgImage;
+      
       await new Promise((resolve, reject) => {
+        const timeout = setTimeout(() => {
+          console.warn('⏱️ Background image loading timeout');
+          resolve(null); // Continue without background image
+        }, 5000); // 5 second timeout
+        
         bgImage!.onload = () => {
+          clearTimeout(timeout);
           console.log('✅ Background image loaded successfully, dimensions:', bgImage!.naturalWidth, 'x', bgImage!.naturalHeight);
+          console.log('✅ Background image complete:', bgImage!.complete, 'naturalWidth:', bgImage!.naturalWidth, 'naturalHeight:', bgImage!.naturalHeight);
           resolve(null);
         };
         bgImage!.onerror = (error) => {
+          clearTimeout(timeout);
           console.error('❌ Failed to load background image:', error, 'URL:', backgroundOption.url);
           resolve(null); // Continue without background image
         };
@@ -661,11 +756,31 @@ export default function VideoCall({ currentUser, activeChat, isGroup, incomingMo
       });
     } else if (backgroundId === 'blur') {
       console.log('🌫️ Using blur effect for background');
+      backgroundImageRef.current = null;
     } else {
       console.log('⚠️ No background URL or blur effect for backgroundId:', backgroundId);
+      backgroundImageRef.current = null;
     }
 
+    let isProcessing = false;
+    const segmentationReady = !!selfieSegmentationRef.current;
+    
+    if (segmentationReady) {
+      console.log('✅ MediaPipe is ready for segmentation');
+    } else {
+      console.warn('⚠️ MediaPipe not initialized yet, will use fallback (video on top)');
+    }
+
+    // Flag to track if processing is still active (used to stop animation loop)
+    let isProcessingActive = true;
+
     const drawFrame = () => {
+      // Stop animation loop if processing is no longer active or video is disposed
+      if (!isProcessingActive || !video || video.readyState === video.HAVE_NOTHING) {
+        animationFrameRef.current = null;
+        return;
+      }
+      
       if (!ctx || video.readyState !== video.HAVE_ENOUGH_DATA) {
         animationFrameRef.current = requestAnimationFrame(drawFrame);
         return;
@@ -684,18 +799,99 @@ export default function VideoCall({ currentUser, activeChat, isGroup, incomingMo
         const y = (canvas.height - canvas.height * scale) / 2;
         ctx.drawImage(video, x, y, canvas.width * scale, canvas.height * scale);
       } else if (bgImage && bgImage.complete && bgImage.naturalWidth > 0) {
-        // Draw background image (scale to fit canvas)
-        ctx.drawImage(bgImage, 0, 0, canvas.width, canvas.height);
-        // Draw video on top (for now, full video - can be enhanced with person segmentation)
-        // Note: This will overlay the video on the background. For proper background replacement,
-        // you would need to use MediaPipe or TensorFlow.js for person segmentation
-        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+        // Draw background image first
+        ctx.fillStyle = '#000000';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        
+        // Draw background image (scale to fit canvas while maintaining aspect ratio)
+        const bgAspect = bgImage.naturalWidth / bgImage.naturalHeight;
+        const canvasAspect = canvas.width / canvas.height;
+        
+        let bgWidth, bgHeight, bgX, bgY;
+        if (bgAspect > canvasAspect) {
+          // Background is wider - fit to height
+          bgHeight = canvas.height;
+          bgWidth = bgHeight * bgAspect;
+          bgX = (canvas.width - bgWidth) / 2;
+          bgY = 0;
+        } else {
+          // Background is taller - fit to width
+          bgWidth = canvas.width;
+          bgHeight = bgWidth / bgAspect;
+          bgX = 0;
+          bgY = (canvas.height - bgHeight) / 2;
+        }
+        
+        ctx.drawImage(bgImage, bgX, bgY, bgWidth, bgHeight);
+        
+        // Use MediaPipe segmentation if available and ready
+        if (selfieSegmentationRef.current) {
+          // Check if video element is still valid before sending to MediaPipe
+          if (video.readyState >= video.HAVE_METADATA && video.videoWidth > 0 && video.videoHeight > 0) {
+            try {
+              // Send frame to MediaPipe (results will come via onResults callback)
+              // Don't await - it's fire-and-forget, results come via callback
+              selfieSegmentationRef.current.send({ image: video }).catch((error: any) => {
+                // Only log if it's not the "object no longer usable" error (which can happen during cleanup)
+                if (error.name !== 'InvalidStateError' && !error.message?.includes('no longer, usable')) {
+                  console.error('❌ MediaPipe send error:', error);
+                }
+              });
+            } catch (error: any) {
+              // Silently handle errors during cleanup or when video is disposed
+              if (error.name !== 'InvalidStateError' && !error.message?.includes('no longer, usable')) {
+                console.error('❌ MediaPipe send exception:', error);
+              }
+            }
+          }
+          
+          // Process the latest results from callback (stored in ref)
+          const results = latestSegmentationResultsRef.current;
+          if (results && results.segmentationMask) {
+            // Get segmentation mask (this is a canvas element)
+            const mask = results.segmentationMask;
+            
+            // Create a temporary canvas to draw the person
+            const personCanvas = document.createElement('canvas');
+            personCanvas.width = canvas.width;
+            personCanvas.height = canvas.height;
+            const personCtx = personCanvas.getContext('2d');
+            
+            if (personCtx) {
+              // Draw video to temporary canvas
+              personCtx.drawImage(video, 0, 0, personCanvas.width, personCanvas.height);
+              
+              // Apply mask to keep only the person
+              // destination-in: keeps existing content where mask is opaque
+              personCtx.globalCompositeOperation = 'destination-in';
+              personCtx.drawImage(mask, 0, 0, personCanvas.width, personCanvas.height);
+              
+              // Now composite: background is already drawn, draw person on top
+              ctx.globalCompositeOperation = 'source-over';
+              ctx.drawImage(personCanvas, 0, 0);
+            } else {
+              console.error('❌ Failed to create person canvas context');
+              // Fallback if can't create context
+              ctx.globalCompositeOperation = 'source-over';
+              ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+            }
+          } else {
+            // Results not ready yet, draw video for now (will update when results arrive)
+            ctx.globalCompositeOperation = 'source-over';
+            ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+          }
+        } else {
+          // No segmentation available - draw video on top (fallback)
+          ctx.globalCompositeOperation = 'source-over';
+          ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+        }
+        
+        animationFrameRef.current = requestAnimationFrame(drawFrame);
       } else {
         // Fallback: just draw video
         ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+        animationFrameRef.current = requestAnimationFrame(drawFrame);
       }
-
-      animationFrameRef.current = requestAnimationFrame(drawFrame);
     };
 
     // Start drawing frames
@@ -705,6 +901,18 @@ export default function VideoCall({ currentUser, activeChat, isGroup, incomingMo
 
     // Wait a bit to ensure video is playing and canvas is drawing
     await new Promise(resolve => setTimeout(resolve, 200));
+    
+    // Store cleanup function to stop processing when needed
+    const stopProcessing = () => {
+      isProcessingActive = false;
+      if (animationFrameRef.current) {
+        cancelAnimationFrame(animationFrameRef.current);
+        animationFrameRef.current = null;
+      }
+    };
+    
+    // Store stop function in a way that cleanup can access it
+    (videoElementRef.current as any)._stopProcessing = stopProcessing;
 
     // Create new stream from canvas
     const processedStream = canvas.captureStream(30); // 30 FPS
@@ -1920,41 +2128,88 @@ export default function VideoCall({ currentUser, activeChat, isGroup, incomingMo
 
   // Handle background change
   const handleBackgroundChange = async (backgroundId: string) => {
+    console.log('🎨 [BACKGROUND CHANGE] Changing background to:', backgroundId);
     setSelectedBackground(backgroundId);
     if (callType === 'video' && localStream.current && callState === 'active') {
       // Stop old processed stream
       if (processedStreamRef.current) {
-        processedStreamRef.current.getVideoTracks().forEach(track => track.stop());
+        console.log('🛑 [BACKGROUND CHANGE] Stopping old processed stream tracks');
+        processedStreamRef.current.getVideoTracks().forEach(track => {
+          track.stop();
+          console.log('🛑 [BACKGROUND CHANGE] Stopped track:', track.id);
+        });
         processedStreamRef.current = null;
       }
       if (animationFrameRef.current) {
+        console.log('🛑 [BACKGROUND CHANGE] Cancelling old animation frame');
         cancelAnimationFrame(animationFrameRef.current);
         animationFrameRef.current = null;
       }
+      
+      // Clean up old canvas and video elements
+      if (canvasRef.current) {
+        console.log('🧹 [BACKGROUND CHANGE] Cleaning up old canvas');
+        const ctx = canvasRef.current.getContext('2d');
+        if (ctx) {
+          ctx.clearRect(0, 0, canvasRef.current.width, canvasRef.current.height);
+        }
+        canvasRef.current = null;
+      }
+      if (videoElementRef.current) {
+        console.log('🧹 [BACKGROUND CHANGE] Cleaning up old video element');
+        videoElementRef.current.srcObject = null;
+        videoElementRef.current.pause();
+        videoElementRef.current = null;
+      }
+      
+      // Wait a bit to ensure old stream is fully stopped before creating new one
+      await new Promise(resolve => setTimeout(resolve, 100));
 
       // Process with new background
       if (backgroundId !== 'none') {
-        const newProcessedStream = await processVideoWithBackground(localStream.current, backgroundId);
-        processedStreamRef.current = newProcessedStream;
+        console.log('🎨 [BACKGROUND CHANGE] Processing with new background:', backgroundId);
+        try {
+          const newProcessedStream = await processVideoWithBackground(localStream.current, backgroundId);
+          processedStreamRef.current = newProcessedStream;
+          console.log('✅ [BACKGROUND CHANGE] New processed stream created with', newProcessedStream.getVideoTracks().length, 'video tracks');
         
-        // Update local peer
-        setPeers(prev => {
-          const newPeers = new Map(prev);
-          const localPeer = newPeers.get(currentUser.id);
-          if (localPeer) {
-            newPeers.set(currentUser.id, { ...localPeer, stream: newProcessedStream });
-          }
-          return newPeers;
-        });
+          // Update local peer
+          setPeers(prev => {
+            const newPeers = new Map(prev);
+            const localPeer = newPeers.get(currentUser.id);
+            if (localPeer) {
+              newPeers.set(currentUser.id, { ...localPeer, stream: newProcessedStream });
+            }
+            return newPeers;
+          });
 
-        // Update all peer connections
-        peerConnections.current.forEach((pc, remoteId) => {
-          // Remove old video track
-          const sender = pc.getSenders().find(s => s.track?.kind === 'video');
-          if (sender && processedStreamRef.current) {
-            sender.replaceTrack(processedStreamRef.current.getVideoTracks()[0]);
-          }
-        });
+          // Update all peer connections
+          peerConnections.current.forEach((pc, remoteId) => {
+            // Replace old video track with new one
+            const sender = pc.getSenders().find(s => s.track?.kind === 'video');
+            if (sender && processedStreamRef.current && processedStreamRef.current.getVideoTracks().length > 0) {
+              const newTrack = processedStreamRef.current.getVideoTracks()[0];
+              console.log('🔄 [BACKGROUND CHANGE] Replacing video track for peer', remoteId, 'with new track:', newTrack.id);
+              sender.replaceTrack(newTrack).catch(err => {
+                console.error('❌ [BACKGROUND CHANGE] Error replacing track for peer', remoteId, ':', err);
+              });
+            } else {
+              console.warn('⚠️ [BACKGROUND CHANGE] No video sender or no processed stream track for peer', remoteId);
+            }
+          });
+        } catch (error) {
+          console.error('❌ [BACKGROUND CHANGE] Error processing video with background:', error);
+          // Fallback to original stream if processing fails
+          processedStreamRef.current = null;
+          setPeers(prev => {
+            const newPeers = new Map(prev);
+            const localPeer = newPeers.get(currentUser.id);
+            if (localPeer && localStream.current) {
+              newPeers.set(currentUser.id, { ...localPeer, stream: localStream.current });
+            }
+            return newPeers;
+          });
+        }
       } else {
         // Use original stream
         processedStreamRef.current = null;
