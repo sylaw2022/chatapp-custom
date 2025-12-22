@@ -2,7 +2,7 @@
 import { useEffect, useState, useRef } from 'react'
 import { createClient } from '@/lib/supabase'
 import { User, Message } from '@/types'
-import { Send, Image as ImageIcon, Loader2, Paperclip, FileText, Download, ArrowLeft } from 'lucide-react' // Added ArrowLeft
+import { Send, Image as ImageIcon, Loader2, Paperclip, FileText, Download, ArrowLeft, Home, Check } from 'lucide-react'
 import VideoCall from './VideoCall'
 
 interface ChatWindowProps {
@@ -10,7 +10,7 @@ interface ChatWindowProps {
   activeChat: any;
   isGroup: boolean;
   acceptedCallMode?: 'audio' | 'video' | null;
-  onBack: () => void; // New Prop
+  onBack: () => void;
 }
 
 export default function ChatWindow({ user, activeChat, isGroup, acceptedCallMode, onBack }: ChatWindowProps) {
@@ -48,38 +48,214 @@ export default function ChatWindow({ user, activeChat, isGroup, acceptedCallMode
     setMessages([]); if (activeChat) { setLoadingChat(true); fetchHistory().finally(() => setLoadingChat(false)) }
   }, [activeChat?.id])
 
-  const fetchHistory = async () => { /* ... same as before ... */ 
+  // Mark messages as read continuously while chat is open
+  useEffect(() => {
+    if (!activeChat || loadingChat) return
+    
+    const markAsRead = async () => {
+      console.log('📖 Marking messages as read for chat:', activeChat.id, 'isGroup:', isGroup)
+      
+      if (isGroup) {
+        // For groups: Mark messages sent by current user as read (when others read them)
+        const { data, error } = await supabase
+          .from('messages')
+          .update({ is_read: true })
+          .eq('sender_id', user.id)
+          .eq('group_id', activeChat.id)
+          .is('recipient_id', null)
+          .eq('is_read', false)
+          .select()
+        
+        if (error) {
+          console.error('❌ Error marking group messages as read:', error)
+        } else {
+          console.log('✅ Marked group messages as read:', data?.length || 0, 'messages')
+          // Update local state immediately for instant UI update
+          if (data && data.length > 0) {
+            setMessages(prev => prev.map(m => 
+              data.some((d: any) => d.id === m.id)
+                ? { ...m, is_read: true }
+                : m
+            ))
+          }
+        }
+      } else {
+        // For direct messages:
+        // 1. Mark messages received by current user as read (when you read them)
+        // This happens because you are viewing the chat
+        const { data: receivedData, error: receivedError } = await supabase
+          .from('messages')
+          .update({ is_read: true })
+          .eq('sender_id', activeChat.id)
+          .eq('recipient_id', user.id)
+          .is('group_id', null)
+          .eq('is_read', false)
+          .select()
+        
+        if (receivedError) {
+          console.error('❌ Error marking received messages as read:', receivedError)
+        } else {
+          console.log('✅ Marked received messages as read:', receivedData?.length || 0, 'messages')
+          // Update local state immediately - mark ALL received messages as read
+          setMessages(prev => prev.map(m => 
+            m.sender_id === activeChat.id && m.recipient_id === user.id
+              ? { ...m, is_read: true }
+              : m
+          ))
+        }
+        
+        // 2. Note: Messages sent by current user are marked as read by the RECIPIENT
+        // when they open the chat. The real-time UPDATE listener will update our view
+        // when the recipient marks them as read. We don't mark our own sent messages here.
+      }
+    }
+    
+    // Mark as read immediately when chat opens
+    const initialTimer = setTimeout(() => {
+      markAsRead()
+    }, 500)
+    
+    // Continue marking as read periodically while chat is open (every 2 seconds)
+    const interval = setInterval(() => {
+      markAsRead()
+    }, 2000)
+    
+    return () => {
+      clearTimeout(initialTimer)
+      clearInterval(interval)
+    }
+  }, [activeChat?.id, loadingChat, user.id, isGroup])
+
+  const fetchHistory = async () => { 
       if (!activeChat) return
       let query = supabase.from('messages').select('*, sender:users!sender_id(username, avatar)').order('timestamp', { ascending: true })
       if (isGroup) query = query.eq('group_id', activeChat.id).is('recipient_id', null) 
       else query = query.is('group_id', null).or(`and(sender_id.eq.${user.id},recipient_id.eq.${activeChat.id}),and(sender_id.eq.${activeChat.id},recipient_id.eq.${user.id})`)
       const { data } = await query
-      if (data) setMessages(data as any)
+      if (data) {
+        // When chat is open, mark all received messages as read in local state
+        const messagesWithReadStatus = data.map((msg: any) => {
+          // If message is received by current user, mark as read since chat is open
+          if (!isGroup && msg.recipient_id === user.id && msg.sender_id === activeChat.id) {
+            return { ...msg, is_read: true }
+          }
+          return msg
+        })
+        setMessages(messagesWithReadStatus as any)
+      }
   }
 
-  useEffect(() => { /* ... same as before ... */ 
-      const channel = supabase.channel('global-chat-listener').on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'messages' }, async (payload) => {
+  useEffect(() => { 
+      const channel = supabase.channel('global-chat-listener')
+        .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'messages' }, async (payload) => {
           const newMsg = payload.new as Message
           if (!activeChatRef.current) return
           let isRelevant = false
           if (isGroupRef.current) isRelevant = (Number(newMsg.group_id) === Number(activeChatRef.current.id)) && (newMsg.recipient_id === null)
           else isRelevant = (newMsg.group_id === null) && ((newMsg.sender_id === activeChatRef.current.id && newMsg.recipient_id === userRef.current.id) || (newMsg.sender_id === userRef.current.id && newMsg.recipient_id === activeChatRef.current.id))
           if (isRelevant) {
-             let senderData = null
+             let senderData: { username: string; avatar: string } | null = null
              if (newMsg.sender_id === userRef.current.id) senderData = { username: userRef.current.username, avatar: userRef.current.avatar }
              else if (!isGroupRef.current && newMsg.sender_id === activeChatRef.current.id) senderData = { username: activeChatRef.current.username, avatar: activeChatRef.current.avatar }
-             else { const { data } = await supabase.from('users').select('username, avatar').eq('id', newMsg.sender_id).single(); senderData = data }
-             setMessages(prev => { if (prev.find(m => m.id === newMsg.id)) return prev; return [...prev, { ...newMsg, sender: senderData } as any] })
+             else { const { data } = await supabase.from('users').select('username, avatar').eq('id', newMsg.sender_id).single(); senderData = data as { username: string; avatar: string } | null }
+             
+             // If this is a received message, mark it as read immediately since chat is open
+             const messageToAdd = { ...newMsg, sender: senderData } as any
+             if (!isGroupRef.current && newMsg.sender_id === activeChatRef.current.id && newMsg.recipient_id === userRef.current.id) {
+               messageToAdd.is_read = true
+               // Also update in database
+               supabase.from('messages').update({ is_read: true }).eq('id', newMsg.id).then(({ error }) => {
+                 if (error) console.error('❌ Error marking new message as read:', error)
+               })
+             }
+             
+             setMessages(prev => { if (prev.find(m => m.id === newMsg.id)) return prev; return [...prev, messageToAdd] })
           }
-      }).subscribe()
+        })
+        .on('postgres_changes', { 
+          event: 'UPDATE', 
+          schema: 'public', 
+          table: 'messages' 
+        }, async (payload) => {
+          const updatedMsg = payload.new as Message
+          const oldMsg = payload.old as Message
+          
+          console.log('🔄 Message UPDATE received in ChatWindow:', {
+            id: updatedMsg.id,
+            old_read: oldMsg?.is_read,
+            new_read: updatedMsg.is_read,
+            sender_id: updatedMsg.sender_id,
+            recipient_id: updatedMsg.recipient_id,
+            group_id: updatedMsg.group_id
+          })
+          
+          if (!activeChatRef.current) {
+            console.log('⚠️ No active chat, ignoring update')
+            return
+          }
+          
+          // Check if the updated message is relevant to current chat
+          let isRelevant = false
+          if (isGroupRef.current) {
+            isRelevant = (Number(updatedMsg.group_id) === Number(activeChatRef.current.id)) && (updatedMsg.recipient_id === null)
+          } else {
+            isRelevant = (updatedMsg.group_id === null) && 
+              ((updatedMsg.sender_id === activeChatRef.current.id && updatedMsg.recipient_id === userRef.current.id) || 
+               (updatedMsg.sender_id === userRef.current.id && updatedMsg.recipient_id === activeChatRef.current.id))
+          }
+          
+          console.log('📋 Update relevance check:', {
+            isRelevant,
+            isGroup: isGroupRef.current,
+            activeChatId: activeChatRef.current.id,
+            userId: userRef.current.id
+          })
+          
+          if (isRelevant) {
+            console.log('✅ Updating message read status in ChatWindow:', updatedMsg.id, 'is_read:', updatedMsg.is_read)
+            // Update the message's read status in the messages list
+            setMessages(prev => {
+              const messageExists = prev.find(m => m.id === updatedMsg.id)
+              if (!messageExists) {
+                console.log('⚠️ Message not found in current messages list')
+                return prev
+              }
+              
+              const updated = prev.map(m => 
+                m.id === updatedMsg.id 
+                  ? { ...m, is_read: updatedMsg.is_read } 
+                  : m
+              )
+              console.log('📝 Updated messages state:', {
+                messageId: updatedMsg.id,
+                oldRead: messageExists.is_read,
+                newRead: updatedMsg.is_read,
+                updatedMessage: updated.find(m => m.id === updatedMsg.id)
+              })
+              return updated
+            })
+          } else {
+            console.log('❌ Message update not relevant to current chat')
+          }
+        })
+        .subscribe()
       return () => { supabase.removeChannel(channel) }
   }, [])
   
   useEffect(() => { if (scrollRef.current) scrollRef.current.scrollIntoView({ behavior: 'smooth' }) }, [messages, loadingChat])
 
-  const handleSend = async (fileUrl?: string, type: 'text'|'image'|'file' = 'text', fileName?: string) => { /* ... same as before ... */
+  const handleSend = async (fileUrl?: string, type: 'text'|'image'|'file' = 'text', fileName?: string) => {
     if (!text.trim() && !fileUrl) return
-    const msgData = { sender_id: user.id, content: fileName || text, type, fileUrl, timestamp: new Date().toISOString(), group_id: isGroup ? activeChat.id : null, recipient_id: isGroup ? null : activeChat.id }
+    const msgData = { 
+      sender_id: user.id, 
+      content: fileName || text, 
+      type, 
+      fileUrl, 
+      timestamp: new Date().toISOString(), 
+      group_id: isGroup ? activeChat.id : null, 
+      recipient_id: isGroup ? null : activeChat.id,
+      is_read: false // New messages start as unread
+    }
     const optimisticId = Date.now()
     setMessages(prev => [...prev, { ...msgData, id: optimisticId, sender: { username: user.username, avatar: user.avatar } } as any])
     setText('')
@@ -121,6 +297,15 @@ export default function ChatWindow({ user, activeChat, isGroup, acceptedCallMode
             {!isGroup && <span className="text-[10px] md:text-xs text-green-600 font-medium">● Online</span>}
           </div>
         </div>
+        
+        {/* Home Button (Visible on Desktop, also on Mobile) */}
+        <button 
+          onClick={onBack}
+          className="p-2 text-gray-600 hover:bg-gray-100 rounded-full transition-colors"
+          title="Back to Home"
+        >
+          <Home size={20} />
+        </button>
       </div>
 
       <VideoCall 
@@ -181,12 +366,55 @@ export default function ChatWindow({ user, activeChat, isGroup, acceptedCallMode
                         )}
                         
                         {/* Text */}
-                        {msg.type === 'text' && <span className="text-sm md:text-[15px] leading-relaxed break-words">{msg.content}</span>}
+                        {msg.type === 'text' && <span className="text-sm md:text-[15px] leading-relaxed wrap-break-word">{msg.content}</span>}
                         
-                        {/* Timestamp */}
-                        <span className={`text-[9px] md:text-[10px] block text-right mt-1 ${isMe ? 'text-blue-100' : 'text-gray-400'}`}>
-                          {new Date(msg.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-                        </span>
+                        {/* Timestamp and Read Status */}
+                        <div className={`flex items-center justify-end gap-1 mt-1 ${isMe ? 'text-blue-100' : 'text-gray-400'}`}>
+                          <span className={`text-[9px] md:text-[10px]`}>
+                            {new Date(msg.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                          </span>
+                          {isMe ? (
+                            // Read status for messages sent by current user
+                            <div className="flex items-center">
+                              {/* Check if message is optimistic (unsent) - ID is a timestamp (Date.now() creates IDs > 1e12) */}
+                              {typeof msg.id === 'number' && msg.id > 1000000000000 ? (
+                                // Single tick: unsent message (optimistic update)
+                                <Check size={12} className="text-blue-200" />
+                              ) : msg.is_read !== false ? (
+                                // Two ticks green: sent and read (true or undefined both mean read when chat is open)
+                                <>
+                                  <Check size={12} className="text-green-400" />
+                                  <Check size={12} className="text-green-400 -ml-1" />
+                                </>
+                              ) : (
+                                // Two ticks red: sent but not read (is_read is explicitly false)
+                                <>
+                                  <Check size={12} className="text-red-400" />
+                                  <Check size={12} className="text-red-400 -ml-1" />
+                                </>
+                              )}
+                            </div>
+                          ) : (
+                            // Read status for messages received by current user
+                            // Since chat is open, all received messages are considered read
+                            <div className="flex items-center">
+                              {/* When chat is open, all received messages show as read (green) */}
+                              {msg.is_read !== false ? (
+                                // Two ticks green: you have read it (chat is open, so it's read)
+                                <>
+                                  <Check size={12} className="text-green-400" />
+                                  <Check size={12} className="text-green-400 -ml-1" />
+                                </>
+                              ) : (
+                                // Two ticks red: unread (shouldn't happen when chat is open)
+                                <>
+                                  <Check size={12} className="text-red-400" />
+                                  <Check size={12} className="text-red-400 -ml-1" />
+                                </>
+                              )}
+                            </div>
+                          )}
+                        </div>
                     </div>
                   </div>
                 </div>

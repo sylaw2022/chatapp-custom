@@ -1,19 +1,29 @@
 'use client'
 import { useEffect, useState, useRef } from 'react'
 import { createClient } from '@/lib/supabase'
-import { User, Group } from '@/types'
-import { UserPlus, Users, MessageSquare, X, Search, Check, Plus, Trash2, Settings, Camera, Loader2, Save } from 'lucide-react'
+import { User, Group, Message } from '@/types'
+import { UserPlus, Users, MessageSquare, X, Search, Check, Plus, Trash2, Settings, Camera, Loader2, Save, RefreshCw, LogOut } from 'lucide-react'
 
 interface SidebarProps {
   currentUser: User;
   onSelect: (chat: any, isGroup: boolean) => void;
-  onUpdateUser: (updatedUser: User) => void; // New Prop
+  onUpdateUser: (updatedUser: User) => void;
+  onLogout: () => void; // New Prop for logout
 }
 
-export default function Sidebar({ currentUser, onSelect, onUpdateUser }: SidebarProps) {
-  const [friends, setFriends] = useState<User[]>([])
-  const [groups, setGroups] = useState<Group[]>([])
+interface FriendWithLatestMessage extends User {
+  latestMessage?: Message | null;
+}
+
+interface GroupWithLatestMessage extends Group {
+  latestMessage?: Message | null;
+}
+
+export default function Sidebar({ currentUser, onSelect, onUpdateUser, onLogout }: SidebarProps) {
+  const [friends, setFriends] = useState<FriendWithLatestMessage[]>([])
+  const [groups, setGroups] = useState<GroupWithLatestMessage[]>([])
   const [view, setView] = useState<'friends' | 'groups'>('friends')
+  const [isRefreshing, setIsRefreshing] = useState(false)
   
   // Modal States
   const [showFriendModal, setShowFriendModal] = useState(false)
@@ -33,8 +43,277 @@ export default function Sidebar({ currentUser, onSelect, onUpdateUser }: Sidebar
 
   const supabase = createClient()
 
+  // Define fetchData first so it can be used in useEffect
+  const fetchData = async () => {
+    if (!currentUser || !currentUser.id) {
+      console.warn('⚠️ Cannot fetch data: currentUser is not set')
+      return
+    }
+    
+    setIsRefreshing(true)
+    try {
+      console.log('🔄 Starting fetchData for user:', currentUser.id, currentUser.username)
+      // 1. Fetch Friends
+      const { data: friendLinks, error: friendLinksError } = await supabase.from('friends').select('friend_id').eq('user_id', currentUser.id)
+      if (friendLinksError) {
+        console.error('Error fetching friend links:', friendLinksError)
+        setIsRefreshing(false)
+        return
+      }
+      
+      let currentFriendIds: number[] = []
+      
+      if (friendLinks) {
+        currentFriendIds = friendLinks.map((f: any) => f.friend_id)
+        if (currentFriendIds.length > 0) {
+          const { data: friendList, error: friendListError } = await supabase.from('users').select('*').in('id', currentFriendIds)
+          if (friendListError) {
+            console.error('Error fetching friend list:', friendListError)
+            setIsRefreshing(false)
+            return
+          }
+          
+          if (friendList) {
+            // Fetch latest message from either party (sent or received) for each friend
+            const friendsWithMessages = await Promise.all(
+              (friendList as User[]).map(async (friend) => {
+                try {
+                  console.log(`🔍 Fetching latest message for friend: ${friend.username} (ID: ${friend.id}), conversation with user: ${currentUser.id}`)
+                  
+                  // Get latest message from either party
+                  const { data: latestMsgData, error: msgError } = await supabase
+                    .from('messages')
+                    .select('*')
+                    .is('group_id', null)
+                    .or(`and(sender_id.eq.${currentUser.id},recipient_id.eq.${friend.id}),and(sender_id.eq.${friend.id},recipient_id.eq.${currentUser.id})`)
+                    .order('timestamp', { ascending: false })
+                    .limit(1)
+                  
+                  if (msgError) {
+                    console.error(`❌ Error fetching latest message for friend ${friend.id}:`, msgError)
+                    return {
+                      ...friend,
+                      latestMessage: null
+                    } as FriendWithLatestMessage
+                  }
+                  
+                  console.log(`📦 Raw message data for ${friend.username}:`, latestMsgData)
+                  
+                  const latestMsg = latestMsgData && Array.isArray(latestMsgData) && latestMsgData.length > 0 ? latestMsgData[0] : null
+                  
+                  // Debug logging
+                  if (latestMsg) {
+                    const isFromMe = latestMsg.sender_id === currentUser.id
+                    console.log(`✅ Latest message for ${friend.username}:`, {
+                      id: latestMsg.id,
+                      content: latestMsg.content?.substring(0, 50) || '[no content]',
+                      read: latestMsg.is_read,
+                      type: latestMsg.type,
+                      timestamp: latestMsg.timestamp,
+                      fromMe: isFromMe
+                    })
+                  } else {
+                    console.log(`❌ No messages found for ${friend.username} (conversation between user ${currentUser.id} and friend ${friend.id})`)
+                  }
+                  
+                  return {
+                    ...friend,
+                    latestMessage: latestMsg
+                  } as FriendWithLatestMessage
+                } catch (error) {
+                  console.error(`💥 Exception fetching message for friend ${friend.id}:`, error)
+                  return {
+                    ...friend,
+                    latestMessage: null
+                  } as FriendWithLatestMessage
+                }
+              })
+            )
+            
+            console.log(`📋 Final friendsWithMessages:`, friendsWithMessages.map(f => ({
+              username: f.username,
+              hasMessage: !!f.latestMessage,
+              messageContent: f.latestMessage?.content?.substring(0, 30)
+            })))
+            
+            setFriends(friendsWithMessages)
+          }
+        } else {
+          setFriends([])
+        }
+      }
+
+      // 2. Fetch Groups
+      const { data: groupLinks, error: groupLinksError } = await supabase.from('group_members').select('group_id').eq('user_id', currentUser.id)
+      if (groupLinksError) {
+        console.error('Error fetching group links:', groupLinksError)
+        setIsRefreshing(false)
+        return
+      }
+      
+      if (groupLinks && groupLinks.length > 0) {
+        const gIds = groupLinks.map((g: any) => g.group_id)
+        const { data: groupList, error: groupListError } = await supabase.from('groups').select('*').in('id', gIds)
+        if (groupListError) {
+          console.error('Error fetching group list:', groupListError)
+          setIsRefreshing(false)
+          return
+        }
+        
+        if (groupList) {
+          // Fetch latest message from any member in each group
+          const groupsWithMessages = await Promise.all(
+            (groupList as Group[]).map(async (group) => {
+              try {
+                const { data: latestMsgData, error: msgError } = await supabase
+                  .from('messages')
+                  .select('*')
+                  .eq('group_id', group.id)
+                  .is('recipient_id', null)
+                  .order('timestamp', { ascending: false })
+                  .limit(1)
+                
+                if (msgError) {
+                  console.error(`Error fetching latest message for group ${group.id}:`, msgError)
+                  return {
+                    ...group,
+                    latestMessage: null
+                  } as GroupWithLatestMessage
+                }
+                
+                const latestMsg = latestMsgData && Array.isArray(latestMsgData) && latestMsgData.length > 0 ? latestMsgData[0] : null
+                
+                if (latestMsg) {
+                  const isFromMe = latestMsg.sender_id === currentUser.id
+                  console.log(`✓ Latest message for group ${group.name}:`, latestMsg.content?.substring(0, 50) || '[no content]', '| Read:', latestMsg.is_read, '| FromMe:', isFromMe)
+                }
+                
+                return {
+                  ...group,
+                  latestMessage: latestMsg
+                } as GroupWithLatestMessage
+              } catch (error) {
+                console.error(`Exception fetching message for group ${group.id}:`, error)
+                return {
+                  ...group,
+                  latestMessage: null
+                } as GroupWithLatestMessage
+              }
+            })
+          )
+          setGroups(groupsWithMessages)
+        }
+      } else {
+        setGroups([])
+      }
+    } catch (error) {
+      console.error('Error in fetchData:', error)
+    } finally {
+      setIsRefreshing(false)
+    }
+  }
+
   useEffect(() => {
-    fetchData()
+    console.log('🔄 Sidebar mounted or currentUser changed, fetching data...', { currentUser: currentUser?.id, username: currentUser?.username })
+    if (currentUser && currentUser.id) {
+      fetchData()
+    } else {
+      console.warn('⚠️ Sidebar useEffect: currentUser is not available yet')
+    }
+  }, [currentUser?.id]) // Use currentUser.id to avoid unnecessary re-renders
+
+  // Refresh data periodically as a fallback (realtime should handle most updates)
+  useEffect(() => {
+    if (!currentUser?.id) return
+    
+    const interval = setInterval(() => {
+      console.log('⏰ Periodic refresh triggered')
+      fetchData()
+    }, 30000) // Refresh every 30 seconds as fallback
+
+    return () => clearInterval(interval)
+  }, [currentUser?.id])
+
+  // Realtime listener for new messages to update latest message previews
+  useEffect(() => {
+    if (!currentUser) return
+    
+    const channel = supabase.channel('sidebar-messages-listener')
+      .on('postgres_changes', { 
+        event: 'INSERT', 
+        schema: 'public', 
+        table: 'messages'
+      }, async (payload) => {
+        const newMsg = payload.new as Message
+        console.log('📨 New message inserted in sidebar:', newMsg)
+        
+        // Update friend's latest message if it's a direct message involving current user
+        if (newMsg.recipient_id && !newMsg.group_id) {
+          // Check if message is from or to a friend
+          const isFromMe = newMsg.sender_id === currentUser.id
+          const isToMe = newMsg.recipient_id === currentUser.id
+          const friendId = isFromMe ? newMsg.recipient_id : newMsg.sender_id
+          
+          if (isFromMe || isToMe) {
+            console.log(`Updating latest message for friend ${friendId}`)
+            setFriends(prev => prev.map(f => 
+              f.id === friendId 
+                ? { ...f, latestMessage: newMsg }
+                : f
+            ))
+          }
+        }
+        // Update group's latest message if it's a group message (from any member)
+        if (newMsg.group_id && !newMsg.recipient_id) {
+          console.log(`Updating latest message for group ${newMsg.group_id}`)
+          setGroups(prev => prev.map(g => 
+            g.id === newMsg.group_id 
+              ? { ...g, latestMessage: newMsg }
+              : g
+          ))
+        }
+      })
+      .on('postgres_changes', {
+        event: 'UPDATE',
+        schema: 'public',
+        table: 'messages'
+      }, async (payload) => {
+        const updatedMsg = payload.new as Message
+        
+        // Update read status for messages sent by current user (when recipient reads them)
+        if (updatedMsg.sender_id === currentUser.id) {
+          // Update read status in friend's latest message
+          if (updatedMsg.recipient_id && !updatedMsg.group_id) {
+            setFriends(prev => prev.map(f => 
+              f.id === updatedMsg.recipient_id && f.latestMessage?.id === updatedMsg.id
+                ? { ...f, latestMessage: updatedMsg }
+                : f
+            ))
+          }
+          // Update read status in group's latest message
+          if (updatedMsg.group_id && !updatedMsg.recipient_id) {
+            setGroups(prev => prev.map(g => 
+              g.id === updatedMsg.group_id && g.latestMessage?.id === updatedMsg.id
+                ? { ...g, latestMessage: updatedMsg }
+                : g
+            ))
+          }
+        }
+        
+        // Update read status for messages received by current user (when you read them)
+        if (updatedMsg.recipient_id === currentUser.id && !updatedMsg.group_id) {
+          setFriends(prev => prev.map(f => 
+            f.id === updatedMsg.sender_id && f.latestMessage?.id === updatedMsg.id
+              ? { ...f, latestMessage: updatedMsg }
+              : f
+          ))
+        }
+      })
+      .subscribe()
+
+    return () => {
+      supabase.removeChannel(channel)
+    }
   }, [currentUser])
 
   // --- Initialize Profile Modal Data ---
@@ -45,32 +324,6 @@ export default function Sidebar({ currentUser, onSelect, onUpdateUser }: Sidebar
       setEditAvatarFile(null)
     }
   }, [showProfileModal, currentUser])
-
-  const fetchData = async () => {
-    // 1. Fetch Friends
-    const { data: friendLinks } = await supabase.from('friends').select('friend_id').eq('user_id', currentUser.id)
-    let currentFriendIds: number[] = []
-    
-    if (friendLinks) {
-      currentFriendIds = friendLinks.map((f: any) => f.friend_id)
-      if (currentFriendIds.length > 0) {
-        const { data: friendList } = await supabase.from('users').select('*').in('id', currentFriendIds)
-        if (friendList) setFriends(friendList as User[])
-      } else {
-        setFriends([])
-      }
-    }
-
-    // 2. Fetch Groups
-    const { data: groupLinks } = await supabase.from('group_members').select('group_id').eq('user_id', currentUser.id)
-    if (groupLinks && groupLinks.length > 0) {
-      const gIds = groupLinks.map((g: any) => g.group_id)
-      const { data: groupList } = await supabase.from('groups').select('*').in('id', gIds)
-      if (groupList) setGroups(groupList as Group[])
-    } else {
-      setGroups([])
-    }
-  }
 
   // --- Logic ---
   const openUserSearch = async () => {
@@ -180,14 +433,26 @@ export default function Sidebar({ currentUser, onSelect, onUpdateUser }: Sidebar
             <span className="text-xs text-green-400">Online</span>
           </div>
         </div>
-        {/* Settings Button */}
-        <button 
-          onClick={() => setShowProfileModal(true)}
-          className="p-2 text-gray-400 hover:text-white hover:bg-gray-800 rounded-full transition-colors"
-          title="Edit Profile"
-        >
-          <Settings size={20} />
-        </button>
+        {/* Action Buttons */}
+        <div className="flex items-center gap-2">
+          {/* Settings Button */}
+          <button 
+            onClick={() => setShowProfileModal(true)}
+            className="p-2 text-gray-400 hover:text-white hover:bg-gray-800 rounded-full transition-colors"
+            title="Edit Profile"
+          >
+            <Settings size={20} />
+          </button>
+          
+          {/* Logout Button */}
+          <button 
+            onClick={onLogout}
+            className="p-2 text-gray-400 hover:text-red-400 hover:bg-gray-800 rounded-full transition-colors"
+            title="Logout"
+          >
+            <LogOut size={20} />
+          </button>
+        </div>
       </div>
 
       {/* Tabs */}
@@ -198,6 +463,14 @@ export default function Sidebar({ currentUser, onSelect, onUpdateUser }: Sidebar
         <button onClick={() => setView('groups')} className={`flex-1 p-2 rounded text-sm flex items-center justify-center gap-2 ${view === 'groups' ? 'bg-blue-600 text-white' : 'bg-gray-800 text-gray-400 hover:bg-gray-700'}`}>
           <MessageSquare size={16} /> Groups
         </button>
+        <button 
+          onClick={() => fetchData()} 
+          disabled={isRefreshing}
+          className="p-2 rounded bg-gray-800 text-gray-400 hover:bg-gray-700 hover:text-white transition-colors disabled:opacity-50"
+          title="Refresh"
+        >
+          <RefreshCw size={16} className={isRefreshing ? 'animate-spin' : ''} />
+        </button>
       </div>
 
       {/* Main List */}
@@ -207,34 +480,159 @@ export default function Sidebar({ currentUser, onSelect, onUpdateUser }: Sidebar
              <button onClick={openUserSearch} className="w-full mb-3 bg-gray-800 hover:bg-gray-700 border border-gray-700 text-gray-300 p-2 rounded flex items-center justify-center gap-2 transition-colors">
                 <Search size={16} /> Find New Friends
              </button>
-             {friends.map(f => (
-               <div key={f.id} onClick={() => onSelect(f, false)} className="p-3 hover:bg-gray-800 rounded-lg cursor-pointer flex items-center gap-3 transition-colors">
-                 <img src={f.avatar} className="w-10 h-10 rounded-full bg-gray-700 object-cover" />
-                 <div>
-                   <p className="text-gray-200 font-medium">{f.nickname || f.username}</p>
-                   <p className="text-xs text-gray-500">@{f.username}</p>
-                 </div>
+             {friends.length === 0 ? (
+               <div className="text-center py-8 text-gray-500 text-sm">
+                 <p>No friends yet. Click "Find New Friends" to add some!</p>
                </div>
-             ))}
+             ) : (
+               friends.map(f => {
+                 const latestMsg = f.latestMessage
+                 
+                 // Debug: Log what we're rendering
+                 if (latestMsg) {
+                   console.log(`🎨 Rendering friend ${f.username} with message:`, latestMsg.content?.substring(0, 30), 'is_read:', latestMsg.is_read, 'sender_id:', latestMsg.sender_id, 'currentUser.id:', currentUser.id)
+                 }
+                 
+                 const getMessagePreview = () => {
+                   if (!latestMsg) {
+                     console.log(`⚠️ No latest message for ${f.username}`)
+                     return null
+                   }
+                   const isFromMe = latestMsg.sender_id === currentUser.id
+                   const prefix = isFromMe ? 'You: ' : ''
+                   if (latestMsg.type === 'image') return `${prefix}📷 Image`
+                   if (latestMsg.type === 'file') return `${prefix}📎 ${latestMsg.content || 'File'}`
+                   const content = latestMsg.content || ''
+                   console.log(`📝 Preview for ${f.username}:`, content.substring(0, 30))
+                   return `${prefix}${content}`
+                 }
+                 const preview = getMessagePreview()
+                 const isLatestFromMe = latestMsg && latestMsg.sender_id === currentUser.id
+                 
+                 return (
+                   <div key={f.id} onClick={() => onSelect(f, false)} className="p-3 hover:bg-gray-800 rounded-lg cursor-pointer flex items-center gap-3 transition-colors">
+                     <img src={f.avatar} className="w-10 h-10 rounded-full bg-gray-700 object-cover flex-shrink-0" />
+                     <div className="flex-1 min-w-0 overflow-hidden">
+                       <div className="flex items-center justify-between gap-2 mb-0.5">
+                         <p className="text-gray-200 font-medium truncate">{f.nickname || f.username}</p>
+                         {latestMsg && (
+                           <div className="flex-shrink-0 ml-1 flex items-center" title={isLatestFromMe ? (latestMsg.is_read ? 'Read' : 'Sent') : (latestMsg.is_read ? 'You read it' : 'Unread')}>
+                             {isLatestFromMe ? (
+                               // Read status for messages sent by current user
+                               latestMsg.is_read === true ? (
+                                 // Two ticks green: sent and read
+                                 <div className="flex items-center">
+                                   <Check size={12} className="text-green-500" />
+                                   <Check size={12} className="text-green-500 -ml-1" />
+                                 </div>
+                               ) : (
+                                 // Two ticks red: sent but not read (is_read is false or undefined)
+                                 <div className="flex items-center">
+                                   <Check size={12} className="text-red-500" />
+                                   <Check size={12} className="text-red-500 -ml-1" />
+                                 </div>
+                               )
+                             ) : (
+                               // Read status for messages received by current user
+                               latestMsg.is_read === true ? (
+                                 // Two ticks green: you have read it
+                                 <div className="flex items-center">
+                                   <Check size={12} className="text-green-500" />
+                                   <Check size={12} className="text-green-500 -ml-1" />
+                                 </div>
+                               ) : (
+                                 // Two ticks red: unread (you haven't read it yet)
+                                 <div className="flex items-center">
+                                   <Check size={12} className="text-red-500" />
+                                   <Check size={12} className="text-red-500 -ml-1" />
+                                 </div>
+                               )
+                             )}
+                           </div>
+                         )}
+                       </div>
+                       {preview ? (
+                         <p className="text-xs text-gray-400 truncate block" title={preview}>{preview}</p>
+                       ) : (
+                         <p className="text-xs text-gray-500 truncate block">@{f.username}</p>
+                       )}
+                     </div>
+                   </div>
+                 )
+               })
+             )}
           </>
         ) : (
           <>
             <button onClick={() => setShowGroupModal(true)} className="w-full mb-3 bg-gray-800 hover:bg-gray-700 border border-gray-700 text-gray-300 p-2 rounded flex items-center justify-center gap-2 transition-colors">
               <Plus size={16} /> Create Group
             </button>
-            {groups.map(g => (
-               <div key={g.id} onClick={() => onSelect(g, true)} className="group p-3 hover:bg-gray-800 rounded-lg cursor-pointer flex items-center justify-between transition-colors">
-                 <div className="flex items-center gap-3">
-                   <div className="w-10 h-10 rounded-full bg-indigo-600 flex items-center justify-center text-white font-bold text-lg">{g.name[0].toUpperCase()}</div>
-                   <span className="text-gray-200 font-medium">{g.name}</span>
-                 </div>
-                 {g.admin_id === currentUser.id && (
-                   <button onClick={(e) => deleteGroup(g.id, e)} className="text-gray-500 hover:text-red-500 hover:bg-red-500/10 p-2 rounded-full opacity-0 group-hover:opacity-100 transition-all">
-                     <Trash2 size={16} />
-                   </button>
-                 )}
-               </div>
-             ))}
+            {groups.map(g => {
+              const latestMsg = g.latestMessage
+              const getMessagePreview = () => {
+                if (!latestMsg) return null
+                if (latestMsg.type === 'image') return '📷 Image'
+                if (latestMsg.type === 'file') return `📎 ${latestMsg.content || 'File'}`
+                return latestMsg.content || ''
+              }
+              const preview = getMessagePreview()
+              
+              return (
+                <div key={g.id} onClick={() => onSelect(g, true)} className="group p-3 hover:bg-gray-800 rounded-lg cursor-pointer flex items-center justify-between transition-colors">
+                  <div className="flex items-center gap-3 flex-1 min-w-0">
+                    <div className="w-10 h-10 rounded-full bg-indigo-600 flex items-center justify-center text-white font-bold text-lg flex-shrink-0">{g.name[0].toUpperCase()}</div>
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="text-gray-200 font-medium truncate">{g.name}</span>
+                        {latestMsg && (
+                          <div className="flex-shrink-0 flex items-center">
+                            {latestMsg.sender_id === currentUser.id ? (
+                              // Read status for messages sent by current user in group
+                              latestMsg.is_read === true ? (
+                                // Two ticks green: sent and read
+                                <div className="flex items-center">
+                                  <Check size={12} className="text-green-500" />
+                                  <Check size={12} className="text-green-500 -ml-1" />
+                                </div>
+                              ) : (
+                                // Two ticks red: sent but not read
+                                <div className="flex items-center">
+                                  <Check size={12} className="text-red-500" />
+                                  <Check size={12} className="text-red-500 -ml-1" />
+                                </div>
+                              )
+                            ) : (
+                              // Read status for messages received by current user in group
+                              latestMsg.is_read === true ? (
+                                // Two ticks green: you have read it
+                                <div className="flex items-center">
+                                  <Check size={12} className="text-green-500" />
+                                  <Check size={12} className="text-green-500 -ml-1" />
+                                </div>
+                              ) : (
+                                // Two ticks red: unread
+                                <div className="flex items-center">
+                                  <Check size={12} className="text-red-500" />
+                                  <Check size={12} className="text-red-500 -ml-1" />
+                                </div>
+                              )
+                            )}
+                          </div>
+                        )}
+                      </div>
+                      {preview && (
+                        <p className="text-xs text-gray-400 truncate mt-0.5">{preview}</p>
+                      )}
+                    </div>
+                  </div>
+                  {g.admin_id === currentUser.id && (
+                    <button onClick={(e) => deleteGroup(g.id, e)} className="text-gray-500 hover:text-red-500 hover:bg-red-500/10 p-2 rounded-full opacity-0 group-hover:opacity-100 transition-all flex-shrink-0">
+                      <Trash2 size={16} />
+                    </button>
+                  )}
+                </div>
+              )
+            })}
           </>
         )}
       </div>

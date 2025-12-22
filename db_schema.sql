@@ -54,10 +54,14 @@ CREATE TABLE IF NOT EXISTS messages (
     group_id INTEGER REFERENCES groups(id) ON DELETE CASCADE,
     content TEXT,
     "fileUrl" TEXT,
-    type TEXT DEFAULT 'text' CHECK(type IN ('text', 'image', 'audio', 'video')),
+    type TEXT DEFAULT 'text' CHECK(type IN ('text', 'image', 'audio', 'video', 'file')),
     timestamp TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    is_read BOOLEAN DEFAULT false,
     CHECK((recipient_id IS NOT NULL AND group_id IS NULL) OR (recipient_id IS NULL AND group_id IS NOT NULL))
 );
+
+-- Add is_read column to existing messages table if it doesn't exist
+ALTER TABLE messages ADD COLUMN IF NOT EXISTS is_read BOOLEAN DEFAULT false;
 
 -- RLS (Open for this demo as we aren't using Supabase Auth UUIDs)
 alter table users enable row level security;
@@ -65,6 +69,13 @@ alter table messages enable row level security;
 alter table friends enable row level security;
 alter table groups enable row level security;
 alter table group_members enable row level security;
+
+-- Drop existing policies if they exist, then recreate
+DROP POLICY IF EXISTS "Public Access" ON users;
+DROP POLICY IF EXISTS "Public Access" ON messages;
+DROP POLICY IF EXISTS "Public Access" ON friends;
+DROP POLICY IF EXISTS "Public Access" ON groups;
+DROP POLICY IF EXISTS "Public Access" ON group_members;
 
 create policy "Public Access" on users for all using (true);
 create policy "Public Access" on messages for all using (true);

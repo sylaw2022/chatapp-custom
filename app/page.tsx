@@ -72,9 +72,11 @@ export default function Home() {
         w-full md:w-auto flex-col h-full z-20
       `}>
         <Sidebar 
+          key={activeChat ? 'sidebar-with-chat' : 'sidebar-no-chat'} 
           currentUser={currentUser} 
           onSelect={(chat, group) => { setActiveChat(chat); setIsGroup(group); }} 
-          onUpdateUser={handleProfileUpdate} 
+          onUpdateUser={handleProfileUpdate}
+          onLogout={() => setCurrentUser(null)} // Logout handler
         />
       </div>
       
@@ -92,7 +94,7 @@ export default function Home() {
           activeChat={activeChat} 
           isGroup={isGroup} 
           acceptedCallMode={acceptedCallMode} 
-          onBack={() => setActiveChat(null)} // NEW: Pass back handler
+          onBack={() => setActiveChat(null)}
         />
       </div>
     </main>

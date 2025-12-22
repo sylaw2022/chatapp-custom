@@ -26,6 +26,7 @@ export interface Message {
   fileUrl?: string;
   type: 'text' | 'image' | 'audio' | 'video' | 'file';
   timestamp: string;
+  is_read?: boolean;
   // Joins
   sender?: User;
 }
