@@ -149,3 +149,10 @@ If issues persist, check browser console for:
 - Connection state logs - shows connection establishment progress
 - Error details - shows full error context for failures
 
+
+
+
+
+
+
+

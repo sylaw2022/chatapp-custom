@@ -583,3 +583,10 @@ peerConnections: { [userId: string]: RTCPeerConnection }
 
 This application demonstrates a full-stack real-time chat system with modern web technologies, real-time synchronization, and peer-to-peer communication capabilities.
 
+
+
+
+
+
+
+

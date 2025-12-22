@@ -147,3 +147,10 @@ If issues persist, check browser console for:
 - "Audio element set for remote peer X" messages - indicates audio setup
 - Any errors related to play() or track handling
 
+
+
+
+
+
+
+

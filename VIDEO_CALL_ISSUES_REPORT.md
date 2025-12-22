@@ -517,3 +517,10 @@ if (pc.remoteDescription && iceCandidateQueue.current.has(senderId)) {
 
 This report identifies critical issues that should be addressed before production deployment, especially the missing `onCallEnd` prop and lack of TURN server configuration.
 
+
+
+
+
+
+
+

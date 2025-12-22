@@ -126,3 +126,10 @@ Receiver: Accept Call → Automatically Joins Call
 
 All changes implemented and tested. Both caller and receiver now automatically join calls without any "Click to Join" prompt.
 
+
+
+
+
+
+
+

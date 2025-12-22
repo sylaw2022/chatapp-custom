@@ -11,9 +11,10 @@ interface ChatWindowProps {
   isGroup: boolean;
   acceptedCallMode?: 'audio' | 'video' | null;
   onBack: () => void;
+  onCallEnd?: () => void;
 }
 
-export default function ChatWindow({ user, activeChat, isGroup, acceptedCallMode, onBack }: ChatWindowProps) {
+export default function ChatWindow({ user, activeChat, isGroup, acceptedCallMode, onBack, onCallEnd }: ChatWindowProps) {
   // ... (All existing state logic remains identical) ...
   const [messages, setMessages] = useState<Message[]>([])
   const [text, setText] = useState('')
@@ -275,10 +276,24 @@ export default function ChatWindow({ user, activeChat, isGroup, acceptedCallMode
   if (!activeChat) return <div className="flex-1 flex items-center justify-center bg-slate-100 text-gray-400">Select a chat</div>
 
   return (
-    <div className="flex-1 flex flex-col h-full bg-slate-100 relative">
+    <div className="flex-1 flex flex-col h-full bg-slate-100 relative" style={{ willChange: 'auto' }}>
       
-      {/* Header - MODIFIED FOR MOBILE */}
-      <div className="p-3 md:p-4 border-b border-gray-200 flex justify-between items-center bg-white shadow-sm z-10 sticky top-0">
+      {/* Header - Always visible with highest z-index - Fixed position to prevent layout shifts */}
+      <div 
+        className="p-3 md:p-4 border-b border-gray-200 flex justify-between items-center bg-white shadow-sm shrink-0 w-full md:!left-80" 
+        style={{ 
+          position: 'fixed',
+          top: 0,
+          left: 0,
+          right: 0,
+          zIndex: 99999, 
+          backgroundColor: 'white',
+          height: '64px',
+          flexShrink: 0,
+          isolation: 'isolate',
+          pointerEvents: 'auto'
+        }}
+      >
         <div className="flex items-center gap-2 md:gap-3">
           
           {/* Back Button (Only Visible on Mobile) */}
@@ -308,16 +323,22 @@ export default function ChatWindow({ user, activeChat, isGroup, acceptedCallMode
         </button>
       </div>
 
-      <VideoCall 
-        currentUser={user} 
-        activeChat={activeChat} 
-        isGroup={isGroup} 
-        incomingMode={acceptedCallMode}
-        onCallEnd={() => {
-          // Call ended, reset any call-related state if needed
-          // This prop is required by VideoCall component
-        }}
-      />
+      {/* Spacer for fixed header */}
+      <div className="h-[64px] shrink-0"></div>
+
+      <div className="shrink-0 relative" style={{ position: 'relative', zIndex: 1, minHeight: '80px', maxHeight: '500px', overflow: 'visible' }}>
+        <VideoCall 
+          currentUser={user} 
+          activeChat={activeChat} 
+          isGroup={isGroup} 
+          incomingMode={acceptedCallMode}
+          onCallEnd={() => {
+            // Call ended, reset acceptedCallMode to null
+            console.log('📞 onCallEnd called from VideoCall, calling parent onCallEnd');
+            onCallEnd?.();
+          }}
+        />
+      </div>
 
       {/* Messages Area - Adjusted padding for mobile */}
       <div className="flex-1 overflow-y-auto p-2 md:p-4 space-y-4 md:space-y-6 bg-slate-100">
