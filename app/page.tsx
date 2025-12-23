@@ -207,7 +207,7 @@ export default function Home() {
   if (!currentUser) return <Auth onLogin={setCurrentUser} />
 
   return (
-    <main className="flex h-screen bg-slate-900 overflow-hidden relative">
+    <main className="flex h-screen bg-slate-900 relative" style={{ height: '100vh', overflow: 'hidden' }}>
       {incomingCall && (
         <IncomingCall 
           caller={incomingCall.caller}
@@ -253,8 +253,8 @@ export default function Home() {
       */}
       <div className={`
         ${!activeChat ? 'hidden md:flex' : 'flex'} 
-        flex-1 flex-col h-full relative bg-slate-100
-      `} style={{ zIndex: 10 }}>
+        flex-1 flex-col relative bg-slate-100
+      `} style={{ zIndex: 10, height: '100%', minHeight: 0, overflow: 'hidden' }}>
         <ChatWindow 
           user={currentUser} 
           activeChat={activeChat} 

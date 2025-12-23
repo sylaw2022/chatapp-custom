@@ -40,16 +40,16 @@ div[id*="__next"],
 div[class*="__next"],
 div[class*="nextjs"],
 div[id*="nextjs"],
-/* Target bottom-left positioned elements */
-body > div[style*="position: fixed"][style*="bottom"],
-body > div[style*="position: fixed"][style*="left"],
-body > div[style*="bottom: 0"],
-body > div[style*="left: 0"],
-div[style*="bottom: 0"][style*="left: 0"],
-div[style*="bottom: 0"][style*="left: 0"] *,
-/* Target any element in bottom-left corner */
-body > *:last-child[style*="position: fixed"],
-body > *:last-child[style*="bottom"] {
+/* Target bottom-left positioned elements - but exclude chat input */
+body > div[style*="position: fixed"][style*="bottom"]:not([data-chat-input]),
+body > div[style*="position: fixed"][style*="left"]:not([data-chat-input]),
+body > div[style*="bottom: 0"]:not([data-chat-input]),
+body > div[style*="left: 0"]:not([data-chat-input]),
+div[style*="bottom: 0"][style*="left: 0"]:not([data-chat-input]),
+div[style*="bottom: 0"][style*="left: 0"]:not([data-chat-input]) *,
+/* Target any element in bottom-left corner - but exclude chat input */
+body > *:last-child[style*="position: fixed"]:not([data-chat-input]),
+body > *:last-child[style*="bottom"]:not([data-chat-input]) {
   display: none !important;
   visibility: hidden !important;
   opacity: 0 !important;
@@ -60,4 +60,57 @@ body > *:last-child[style*="bottom"] {
   position: absolute !important;
   left: -9999px !important;
   bottom: -9999px !important;
+}
+
+/* Mobile chat improvements */
+.word-wrap {
+  word-wrap: break-word;
+  overflow-wrap: break-word;
+}
+
+.touch-manipulation {
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
+}
+
+/* Mobile Chrome viewport fix */
+@supports (-webkit-touch-callout: none) {
+  /* iOS Safari and Chrome on iOS */
+  .mobile-viewport-fix {
+    height: -webkit-fill-available;
+  }
+}
+
+/* Chat input area - Fixed on mobile, relative on desktop */
+.chat-input-area {
+  position: relative;
+  z-index: 10;
+  padding-bottom: 8px;
+}
+
+/* Messages container padding */
+.messages-container {
+  padding-bottom: 20px;
+}
+
+@media (max-width: 768px) {
+  body {
+    overflow-x: hidden;
+  }
+  
+  /* Fixed positioning on mobile for better visibility */
+  .chat-input-area {
+    position: fixed !important;
+    bottom: 0 !important;
+    left: 0 !important;
+    right: 0 !important;
+    z-index: 99999 !important;
+    padding-bottom: max(env(safe-area-inset-bottom, 0px), 8px) !important;
+    box-shadow: 0 -2px 10px rgba(0,0,0,0.1) !important;
+  }
+  
+  /* Extra bottom padding on mobile to account for fixed input */
+  .messages-container {
+    padding-bottom: 120px !important;
+  }
 }
