@@ -2,7 +2,7 @@
 import { useEffect, useRef, useState, useCallback } from 'react'
 import { createClient } from '@/lib/supabase'
 import { User } from '@/types'
-import { Phone, PhoneOff, Video as VideoIcon, VideoOff, Mic, MicOff, Image as ImageIcon, Upload, X } from 'lucide-react'
+import { Phone, PhoneOff, Video as VideoIcon, VideoOff, Mic, MicOff, Image as ImageIcon } from 'lucide-react'
 
 // --- CONFIG & TYPES ---
 const rtcConfig = {
@@ -147,7 +147,6 @@ export default function VideoCall({ currentUser, activeChat, isGroup, incomingMo
   const [showBackgroundSelector, setShowBackgroundSelector] = useState(false);
   const [userBackgrounds, setUserBackgrounds] = useState<Array<{ id: string; name: string; url: string }>>([]);
   const [previewBackground, setPreviewBackground] = useState<string | null>(null);
-  const fileInputRef = useRef<HTMLInputElement>(null);
   
   const localStream = useRef<MediaStream | null>(null);
   const processedStreamRef = useRef<MediaStream | null>(null); // Processed stream with background
@@ -320,24 +319,40 @@ export default function VideoCall({ currentUser, activeChat, isGroup, incomingMo
     };
   }, [showBackgroundSelector]);
   
-  // Load user backgrounds from localStorage on mount
+  // Load user backgrounds from localStorage on mount and when it changes
   useEffect(() => {
-    const saved = localStorage.getItem('userBackgrounds');
-    if (saved) {
-      try {
-        setUserBackgrounds(JSON.parse(saved));
-      } catch (e) {
-        console.error('Failed to load user backgrounds:', e);
+    const loadBackgrounds = () => {
+      const saved = localStorage.getItem('userBackgrounds');
+      if (saved) {
+        try {
+          setUserBackgrounds(JSON.parse(saved));
+        } catch (e) {
+          console.error('Failed to load user backgrounds:', e);
+        }
+      } else {
+        setUserBackgrounds([]);
       }
-    }
+    };
+    
+    loadBackgrounds();
+    
+    // Listen for storage changes (when backgrounds are updated in Settings)
+    const handleStorageChange = (e: StorageEvent) => {
+      if (e.key === 'userBackgrounds') {
+        loadBackgrounds();
+      }
+    };
+    
+    window.addEventListener('storage', handleStorageChange);
+    
+    // Also check periodically in case of same-tab updates
+    const interval = setInterval(loadBackgrounds, 1000);
+    
+    return () => {
+      window.removeEventListener('storage', handleStorageChange);
+      clearInterval(interval);
+    };
   }, []);
-  
-  // Save user backgrounds to localStorage
-  useEffect(() => {
-    if (userBackgrounds.length > 0) {
-      localStorage.setItem('userBackgrounds', JSON.stringify(userBackgrounds));
-    }
-  }, [userBackgrounds]);
   
   // Get all available backgrounds (predefined + user uploaded)
   const getAllBackgrounds = useCallback(() => {
@@ -349,53 +364,6 @@ export default function VideoCall({ currentUser, activeChat, isGroup, incomingMo
     return getAllBackgrounds().find(bg => bg.id === id);
   }, [getAllBackgrounds]);
   
-  // Handle file upload
-  const handleBackgroundUpload = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    
-    // Validate file type
-    if (!file.type.startsWith('image/')) {
-      alert('Please select an image file');
-      return;
-    }
-    
-    // Validate file size (max 10MB)
-    if (file.size > 10 * 1024 * 1024) {
-      alert('Image size should be less than 10MB');
-      return;
-    }
-    
-    const reader = new FileReader();
-    reader.onload = (event) => {
-      const url = event.target?.result as string;
-      const newBackground = {
-        id: `user-${Date.now()}`,
-        name: file.name.replace(/\.[^/.]+$/, ''), // Remove extension
-        url: url
-      };
-      setUserBackgrounds(prev => [...prev, newBackground]);
-      setSelectedBackground(newBackground.id);
-      setPreviewBackground(null);
-    };
-    reader.onerror = () => {
-      alert('Failed to read image file');
-    };
-    reader.readAsDataURL(file);
-    
-    // Reset file input
-    if (fileInputRef.current) {
-      fileInputRef.current.value = '';
-    }
-  }, []);
-  
-  // Delete user background
-  const deleteUserBackground = useCallback((id: string) => {
-    setUserBackgrounds(prev => prev.filter(bg => bg.id !== id));
-    if (selectedBackground === id) {
-      setSelectedBackground('none');
-    }
-  }, [selectedBackground]);
 
   const roomId = `call-${isGroup ? `group-${activeChat.id}` : `dm-${[currentUser.id, activeChat.id].sort().join('-')}`}`;
 
@@ -2207,7 +2175,7 @@ export default function VideoCall({ currentUser, activeChat, isGroup, incomingMo
   const handleBackgroundChange = async (backgroundId: string) => {
     console.log('🎨 [BACKGROUND CHANGE] Changing background to:', backgroundId);
     setSelectedBackground(backgroundId);
-    if (callType === 'video' && localStream.current && callState === 'active') {
+    if (callType === 'video' && localStream.current && (callState === 'active' || callState === 'calling')) {
       // Stop old processed stream
       if (processedStreamRef.current) {
         console.log('🛑 [BACKGROUND CHANGE] Stopping old processed stream tracks');
@@ -2315,90 +2283,77 @@ export default function VideoCall({ currentUser, activeChat, isGroup, incomingMo
     return (
       <div className="border-b border-gray-800 p-3 bg-gray-900 shrink-0" style={{ position: 'relative', zIndex: 1, minHeight: '80px' }}>
         <div className="flex flex-col gap-3">
-          {/* Background Selection (only show for video calls) */}
-          <div className="flex items-center justify-between">
-            <span className="text-gray-300 text-sm">Video Background:</span>
-            <div className="relative" ref={backgroundSelectorRef}>
-              <button 
-                onClick={(e) => {
-                  e.stopPropagation();
-                  setShowBackgroundSelector(!showBackgroundSelector);
-                }}
-                className={`px-3 py-1.5 rounded-lg text-sm text-white border-2 transition-colors ${
-                  selectedBackground !== 'none' 
-                    ? 'border-blue-500 bg-blue-600 hover:bg-blue-500' 
-                    : 'border-gray-600 bg-gray-700 hover:bg-gray-600'
-                }`}
-              >
-                {getBackgroundById(selectedBackground)?.name || 'None'}
-                <span className="ml-2">▼</span>
-              </button>
-              {showBackgroundSelector && (
-                <>
-                  {/* Backdrop for mobile */}
-                  <div 
-                    className="fixed inset-0 bg-black bg-opacity-50 z-[99999] sm:hidden"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      setShowBackgroundSelector(false);
-                    }}
-                    style={{ zIndex: 99999 }}
-                  />
-                  <div 
-                    className="fixed sm:absolute sm:top-full sm:right-0 top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 sm:translate-x-0 sm:translate-y-0 mt-0 sm:mt-2 bg-gray-800 border border-gray-700 rounded-lg p-4 shadow-2xl z-[100000] w-[90vw] max-w-[400px] max-h-[80vh] overflow-y-auto"
-                    onClick={(e) => e.stopPropagation()}
-                    style={{ zIndex: 100000 }}
-                  >
-                  <div className="text-white text-sm font-bold mb-3 flex items-center justify-between">
-                    <span>Select Background</span>
-                    <button
-                      onClick={() => fileInputRef.current?.click()}
-                      className="text-xs bg-blue-600 hover:bg-blue-500 px-2 py-1 rounded flex items-center gap-1"
+          {/* Background Selection (only show for video calls when active) */}
+          {callType === 'video' && (callState === 'active' || callState === 'calling') && (
+            <div className="flex items-center justify-between">
+              <span className="text-gray-300 text-sm">Video Background:</span>
+              <div className="relative" ref={backgroundSelectorRef}>
+                <button 
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setShowBackgroundSelector(!showBackgroundSelector);
+                  }}
+                  className={`px-3 py-1.5 rounded-lg text-sm text-white border-2 transition-colors ${
+                    selectedBackground !== 'none' 
+                      ? 'border-blue-500 bg-blue-600 hover:bg-blue-500' 
+                      : 'border-gray-600 bg-gray-700 hover:bg-gray-600'
+                  }`}
+                >
+                  {getBackgroundById(selectedBackground)?.name || 'None'}
+                  <span className="ml-2">▼</span>
+                </button>
+                {showBackgroundSelector && (
+                  <>
+                    {/* Backdrop for mobile */}
+                    <div 
+                      className="fixed inset-0 bg-black bg-opacity-50 z-[99999] sm:hidden"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setShowBackgroundSelector(false);
+                      }}
+                      style={{ zIndex: 99999 }}
+                    />
+                    <div 
+                      className="fixed sm:absolute sm:top-full sm:right-0 top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 sm:translate-x-0 sm:translate-y-0 mt-0 sm:mt-2 bg-gray-800 border border-gray-700 rounded-lg p-4 shadow-2xl z-[100000] w-[90vw] max-w-[400px] max-h-[80vh] overflow-y-auto"
+                      onClick={(e) => e.stopPropagation()}
+                      style={{ zIndex: 100000 }}
                     >
-                      <Upload size={12} />
-                      Upload
-                    </button>
-                  </div>
-                  
-                  <input
-                    ref={fileInputRef}
-                    type="file"
-                    accept="image/*"
-                    onChange={handleBackgroundUpload}
-                    className="hidden"
-                  />
-                  
-                  {/* Preview Section */}
-                  {previewBackground && (
-                    <div className="mb-3 p-2 bg-gray-900 rounded border border-gray-600">
-                      <div className="text-xs text-gray-400 mb-2">Preview:</div>
-                      <div className="relative aspect-video bg-gray-700 rounded overflow-hidden">
-                        {previewBackground === 'blur' ? (
-                          <div className="w-full h-full flex items-center justify-center text-gray-400 text-xs">
-                            Blur Effect
-                          </div>
-                        ) : previewBackground === 'none' ? (
-                          <div className="w-full h-full flex items-center justify-center text-gray-400 text-xs">
-                            No Background
-                          </div>
-                        ) : (
-                          <img 
-                            src={getBackgroundById(previewBackground)?.url || ''} 
-                            alt="Preview" 
-                            className="w-full h-full object-cover"
-                          />
-                        )}
-                      </div>
+                    <div className="text-white text-sm font-bold mb-3">
+                      <span>Select Background</span>
+                      <p className="text-xs text-gray-400 font-normal mt-1">Manage backgrounds in Settings</p>
                     </div>
-                  )}
-                  
-                  <div className="grid grid-cols-2 gap-2">
-                    {getAllBackgrounds().map(bg => (
-                      <div key={bg.id} className="relative group">
+                    
+                    {/* Preview Section */}
+                    {previewBackground && (
+                      <div className="mb-3 p-2 bg-gray-900 rounded border border-gray-600">
+                        <div className="text-xs text-gray-400 mb-2">Preview:</div>
+                        <div className="relative aspect-video bg-gray-700 rounded overflow-hidden">
+                          {previewBackground === 'blur' ? (
+                            <div className="w-full h-full flex items-center justify-center text-gray-400 text-xs">
+                              Blur Effect
+                            </div>
+                          ) : previewBackground === 'none' ? (
+                            <div className="w-full h-full flex items-center justify-center text-gray-400 text-xs">
+                              No Background
+                            </div>
+                          ) : (
+                            <img 
+                              src={getBackgroundById(previewBackground)?.url || ''} 
+                              alt="Preview" 
+                              className="w-full h-full object-cover"
+                            />
+                          )}
+                        </div>
+                      </div>
+                    )}
+                    
+                    <div className="grid grid-cols-2 gap-2">
+                      {getAllBackgrounds().map(bg => (
                         <button
-                          onClick={(e) => {
+                          key={bg.id}
+                          onClick={async (e) => {
                             e.stopPropagation();
-                            setSelectedBackground(bg.id);
+                            await handleBackgroundChange(bg.id);
                             setPreviewBackground(bg.id);
                             if (bg.id === 'none') {
                               setShowBackgroundSelector(false);
@@ -2413,26 +2368,14 @@ export default function VideoCall({ currentUser, activeChat, isGroup, incomingMo
                         >
                           {bg.name}
                         </button>
-                        {bg.id.startsWith('user-') && (
-                          <button
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              deleteUserBackground(bg.id);
-                            }}
-                            className="absolute -top-1 -right-1 bg-red-600 hover:bg-red-500 rounded-full p-1 opacity-0 group-hover:opacity-100 transition-opacity"
-                            title="Delete"
-                          >
-                            <X size={12} />
-                          </button>
-                        )}
-                      </div>
-                    ))}
-                  </div>
-                  </div>
-                </>
-              )}
+                      ))}
+                    </div>
+                    </div>
+                  </>
+                )}
+              </div>
             </div>
-          </div>
+          )}
           
           {/* Call Buttons */}
           <div className="flex gap-2 justify-end">
@@ -2570,24 +2513,10 @@ export default function VideoCall({ currentUser, activeChat, isGroup, incomingMo
                         onClick={(e) => e.stopPropagation()}
                         style={{ zIndex: 100000 }}
                       >
-                      <div className="text-white text-sm font-bold mb-3 flex items-center justify-between">
+                      <div className="text-white text-sm font-bold mb-3">
                         <span>Select Background</span>
-                        <button
-                          onClick={() => fileInputRef.current?.click()}
-                          className="text-xs bg-blue-600 hover:bg-blue-500 px-2 py-1 rounded flex items-center gap-1"
-                        >
-                          <Upload size={12} />
-                          Upload
-                        </button>
+                        <p className="text-xs text-gray-400 font-normal mt-1">Manage backgrounds in Settings</p>
                       </div>
-                      
-                      <input
-                        ref={fileInputRef}
-                        type="file"
-                        accept="image/*"
-                        onChange={handleBackgroundUpload}
-                        className="hidden"
-                      />
                       
                       {/* Preview Section */}
                       {previewBackground && (
@@ -2615,38 +2544,25 @@ export default function VideoCall({ currentUser, activeChat, isGroup, incomingMo
                       
                       <div className="grid grid-cols-2 gap-2">
                         {getAllBackgrounds().map(bg => (
-                          <div key={bg.id} className="relative group">
-                            <button
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                handleBackgroundChange(bg.id);
-                                setPreviewBackground(bg.id);
-                                if (bg.id === 'none') {
-                                  setShowBackgroundSelector(false);
-                                }
-                              }}
-                              onMouseEnter={() => setPreviewBackground(bg.id)}
-                              className={`w-full p-2 rounded-lg text-xs font-medium text-white border-2 transition-colors ${
-                                selectedBackground === bg.id 
-                                  ? 'border-blue-500 bg-blue-600' 
-                                  : 'border-gray-600 bg-gray-700 hover:bg-gray-600'
-                              }`}
-                            >
-                              {bg.name}
-                            </button>
-                            {bg.id.startsWith('user-') && (
-                              <button
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  deleteUserBackground(bg.id);
-                                }}
-                                className="absolute -top-1 -right-1 bg-red-600 hover:bg-red-500 rounded-full p-1 opacity-0 group-hover:opacity-100 transition-opacity"
-                                title="Delete"
-                              >
-                                <X size={12} />
-                              </button>
-                            )}
-                          </div>
+                          <button
+                            key={bg.id}
+                            onClick={async (e) => {
+                              e.stopPropagation();
+                              await handleBackgroundChange(bg.id);
+                              setPreviewBackground(bg.id);
+                              if (bg.id === 'none') {
+                                setShowBackgroundSelector(false);
+                              }
+                            }}
+                            onMouseEnter={() => setPreviewBackground(bg.id)}
+                            className={`w-full p-2 rounded-lg text-xs font-medium text-white border-2 transition-colors ${
+                              selectedBackground === bg.id 
+                                ? 'border-blue-500 bg-blue-600' 
+                                : 'border-gray-600 bg-gray-700 hover:bg-gray-600'
+                            }`}
+                          >
+                            {bg.name}
+                          </button>
                         ))}
                       </div>
                     </div>

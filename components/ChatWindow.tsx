@@ -1,5 +1,5 @@
 'use client'
-import { useEffect, useState, useRef } from 'react'
+import { useEffect, useState, useRef, useCallback } from 'react'
 import { createClient } from '@/lib/supabase'
 import { User, Message } from '@/types'
 import { Send, Image as ImageIcon, Loader2, Paperclip, FileText, Download, ArrowLeft, Home, Check } from 'lucide-react'
@@ -23,6 +23,9 @@ export default function ChatWindow({ user, activeChat, isGroup, acceptedCallMode
   
   const supabase = createClient()
   const scrollRef = useRef<HTMLDivElement>(null)
+  const messagesContainerRef = useRef<HTMLDivElement>(null)
+  const isUserScrollingRef = useRef(false)
+  const shouldAutoScrollRef = useRef(true)
   
   const activeChatRef = useRef(activeChat)
   const isGroupRef = useRef(isGroup)
@@ -239,7 +242,66 @@ export default function ChatWindow({ user, activeChat, isGroup, acceptedCallMode
       return () => { supabase.removeChannel(channel) }
   }, [])
   
-  useEffect(() => { if (scrollRef.current) scrollRef.current.scrollIntoView({ behavior: 'smooth' }) }, [messages, loadingChat])
+  // Auto-scroll to bottom only if user is near bottom or it's a new message from current user
+  const scrollToBottom = useCallback((force: boolean = false) => {
+    if (!messagesContainerRef.current) return
+    
+    const container = messagesContainerRef.current
+    const isNearBottom = container.scrollHeight - container.scrollTop - container.clientHeight < 100
+    
+    // Only auto-scroll if:
+    // 1. Force is true (initial load)
+    // 2. User is near bottom (within 100px)
+    // 3. Should auto-scroll flag is true
+    if (force || (isNearBottom && shouldAutoScrollRef.current)) {
+      setTimeout(() => {
+        if (scrollRef.current && messagesContainerRef.current) {
+          messagesContainerRef.current.scrollTop = messagesContainerRef.current.scrollHeight
+        }
+      }, 50)
+    }
+  }, [])
+
+  // Handle scroll events to detect user scrolling up
+  useEffect(() => {
+    const container = messagesContainerRef.current
+    if (!container) return
+
+    const handleScroll = () => {
+      const isNearBottom = container.scrollHeight - container.scrollTop - container.clientHeight < 100
+      shouldAutoScrollRef.current = isNearBottom
+      isUserScrollingRef.current = true
+      
+      // Reset flag after scroll ends
+      clearTimeout((handleScroll as any).timeout)
+      ;(handleScroll as any).timeout = setTimeout(() => {
+        isUserScrollingRef.current = false
+      }, 150)
+    }
+
+    container.addEventListener('scroll', handleScroll)
+    return () => {
+      container.removeEventListener('scroll', handleScroll)
+      clearTimeout((handleScroll as any).timeout)
+    }
+  }, [])
+
+  // Auto-scroll on new messages or initial load
+  useEffect(() => {
+    if (loadingChat) {
+      // Initial load - always scroll to bottom
+      scrollToBottom(true)
+    } else if (messages.length > 0) {
+      // Check if last message is from current user (new message sent)
+      const lastMessage = messages[messages.length - 1]
+      const isMyMessage = lastMessage.sender_id === user.id
+      
+      // Auto-scroll if it's my message or user is near bottom
+      if (isMyMessage || shouldAutoScrollRef.current) {
+        scrollToBottom(false)
+      }
+    }
+  }, [messages, loadingChat, scrollToBottom, user.id])
 
   const handleSend = async (fileUrl?: string, type: 'text'|'image'|'file' = 'text', fileName?: string) => {
     if (!text.trim() && !fileUrl) return
@@ -337,7 +399,11 @@ export default function ChatWindow({ user, activeChat, isGroup, acceptedCallMode
       </div>
 
       {/* Messages Area - Adjusted padding for mobile */}
-      <div className="flex-1 overflow-y-auto p-2 md:p-4 space-y-4 md:space-y-6 bg-slate-100">
+      <div 
+        ref={messagesContainerRef}
+        className="flex-1 overflow-y-auto p-2 md:p-4 space-y-4 md:space-y-6 bg-slate-100"
+        style={{ scrollBehavior: 'smooth' }}
+      >
         {loadingChat ? (
           <div className="flex h-full items-center justify-center">
             <Loader2 className="animate-spin text-blue-500" size={32} />

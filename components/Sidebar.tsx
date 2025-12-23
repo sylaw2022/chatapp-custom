@@ -2,7 +2,7 @@
 import { useEffect, useState, useRef } from 'react'
 import { createClient } from '@/lib/supabase'
 import { User, Group, Message } from '@/types'
-import { UserPlus, Users, MessageSquare, X, Search, Check, Plus, Trash2, Settings, Camera, Loader2, Save, RefreshCw, LogOut } from 'lucide-react'
+import { UserPlus, Users, MessageSquare, X, Search, Check, Plus, Trash2, Settings, Camera, Loader2, Save, RefreshCw, LogOut, Upload, Image as ImageIcon } from 'lucide-react'
 
 interface SidebarProps {
   currentUser: User;
@@ -40,6 +40,10 @@ export default function Sidebar({ currentUser, onSelect, onUpdateUser, onLogout 
   const [editAvatarFile, setEditAvatarFile] = useState<File | null>(null)
   const [editAvatarPreview, setEditAvatarPreview] = useState('')
   const [isUpdating, setIsUpdating] = useState(false)
+  
+  // Background Management States
+  const [userBackgrounds, setUserBackgrounds] = useState<Array<{ id: string; name: string; url: string }>>([])
+  const backgroundFileInputRef = useRef<HTMLInputElement>(null)
 
   const supabase = createClient()
 
@@ -316,6 +320,27 @@ export default function Sidebar({ currentUser, onSelect, onUpdateUser, onLogout 
     }
   }, [currentUser])
 
+  // Load user backgrounds from localStorage on mount
+  useEffect(() => {
+    const saved = localStorage.getItem('userBackgrounds');
+    if (saved) {
+      try {
+        setUserBackgrounds(JSON.parse(saved));
+      } catch (e) {
+        console.error('Failed to load user backgrounds:', e);
+      }
+    }
+  }, []);
+  
+  // Save user backgrounds to localStorage
+  useEffect(() => {
+    if (userBackgrounds.length > 0) {
+      localStorage.setItem('userBackgrounds', JSON.stringify(userBackgrounds));
+    } else {
+      localStorage.removeItem('userBackgrounds');
+    }
+  }, [userBackgrounds]);
+
   // --- Initialize Profile Modal Data ---
   useEffect(() => {
     if (showProfileModal) {
@@ -421,6 +446,49 @@ export default function Sidebar({ currentUser, onSelect, onUpdateUser, onLogout 
       setIsUpdating(false)
     }
   }
+  
+  // Handle background image upload
+  const handleBackgroundUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    
+    // Validate file type
+    if (!file.type.startsWith('image/')) {
+      alert('Please select an image file');
+      return;
+    }
+    
+    // Validate file size (max 10MB)
+    if (file.size > 10 * 1024 * 1024) {
+      alert('Image size should be less than 10MB');
+      return;
+    }
+    
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      const url = event.target?.result as string;
+      const newBackground = {
+        id: `user-${Date.now()}`,
+        name: file.name.replace(/\.[^/.]+$/, ''), // Remove extension
+        url: url
+      };
+      setUserBackgrounds(prev => [...prev, newBackground]);
+    };
+    reader.onerror = () => {
+      alert('Failed to read image file');
+    };
+    reader.readAsDataURL(file);
+    
+    // Reset file input
+    if (backgroundFileInputRef.current) {
+      backgroundFileInputRef.current.value = '';
+    }
+  };
+  
+  // Delete user background
+  const deleteUserBackground = (id: string) => {
+    setUserBackgrounds(prev => prev.filter(bg => bg.id !== id));
+  };
 
   return (
     <div className="w-full md:w-80 bg-gray-900 border-r border-gray-800 flex flex-col h-full">
@@ -679,6 +747,60 @@ export default function Sidebar({ currentUser, onSelect, onUpdateUser, onLogout 
                   disabled
                   title="Username cannot be changed"
                 />
+              </div>
+              
+              {/* Video Call Backgrounds Section */}
+              <div className="w-full space-y-3 border-t border-gray-800 pt-4">
+                <div className="flex items-center justify-between">
+                  <label className="text-xs text-gray-400 uppercase font-bold">Video Call Backgrounds</label>
+                  <button
+                    onClick={() => backgroundFileInputRef.current?.click()}
+                    className="text-xs bg-blue-600 hover:bg-blue-500 px-3 py-1.5 rounded flex items-center gap-1.5 text-white transition-colors"
+                  >
+                    <Upload size={14} />
+                    Upload
+                  </button>
+                </div>
+                
+                <input
+                  ref={backgroundFileInputRef}
+                  type="file"
+                  accept="image/*"
+                  onChange={handleBackgroundUpload}
+                  className="hidden"
+                />
+                
+                {userBackgrounds.length > 0 && (
+                  <div className="grid grid-cols-2 gap-2 max-h-48 overflow-y-auto">
+                    {userBackgrounds.map(bg => (
+                      <div key={bg.id} className="relative group">
+                        <div className="aspect-video bg-gray-800 rounded-lg overflow-hidden border border-gray-700">
+                          <img 
+                            src={bg.url} 
+                            alt={bg.name}
+                            className="w-full h-full object-cover"
+                          />
+                        </div>
+                        <button
+                          onClick={() => deleteUserBackground(bg.id)}
+                          className="absolute -top-1 -right-1 bg-red-600 hover:bg-red-500 rounded-full p-1 opacity-0 group-hover:opacity-100 transition-opacity"
+                          title="Delete"
+                        >
+                          <X size={12} className="text-white" />
+                        </button>
+                        <p className="text-xs text-gray-400 mt-1 truncate">{bg.name}</p>
+                      </div>
+                    ))}
+                  </div>
+                )}
+                
+                {userBackgrounds.length === 0 && (
+                  <div className="text-center py-4 text-gray-500 text-sm">
+                    <ImageIcon size={24} className="mx-auto mb-2 opacity-50" />
+                    <p>No custom backgrounds yet</p>
+                    <p className="text-xs mt-1">Upload images to use as video call backgrounds</p>
+                  </div>
+                )}
               </div>
             </div>
 
