@@ -57,6 +57,7 @@ export default function Auth({ onLogin }: AuthProps) {
 
   return (
     <div className="flex flex-col items-center justify-center min-h-screen bg-slate-900 text-white">
+      <h1 className="text-4xl font-bold mb-8 text-center">SYLAW CHATAPP</h1>
       <div className="w-full max-w-md p-8 bg-slate-800 rounded-lg shadow-xl">
         <h2 className="text-2xl font-bold mb-6 text-center">{isSignUp ? 'Register' : 'Login'}</h2>
         <form onSubmit={handleAuth} className="space-y-4">

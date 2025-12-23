@@ -24,10 +24,192 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="en">
+      <head>
+        <style dangerouslySetInnerHTML={{
+          __html: `
+            [data-nextjs-toast],
+            [data-nextjs-toast] *,
+            .__next-dev-overlay,
+            #__next-build-watcher,
+            [data-nextjs-dialog],
+            [data-nextjs-dialog-overlay],
+            iframe[src*="__next"],
+            iframe[src*="next"],
+            div[data-nextjs-dialog],
+            div[data-nextjs-dialog-overlay],
+            div[id*="__next"],
+            div[class*="__next"],
+            div[class*="nextjs"],
+            div[id*="nextjs"],
+            body > div[style*="position: fixed"][style*="bottom"],
+            body > div[style*="position: fixed"][style*="left"],
+            body > div[style*="bottom: 0"],
+            body > div[style*="left: 0"],
+            div[style*="bottom: 0"][style*="left: 0"],
+            div[style*="bottom: 0"][style*="left: 0"] * {
+              display: none !important;
+              visibility: hidden !important;
+              opacity: 0 !important;
+              pointer-events: none !important;
+              height: 0 !important;
+              width: 0 !important;
+              overflow: hidden !important;
+              position: absolute !important;
+              left: -9999px !important;
+              bottom: -9999px !important;
+            }
+          `
+        }} />
+      </head>
       <body
         className={`${geistSans.variable} ${geistMono.variable} antialiased`}
       >
         {children}
+        <script dangerouslySetInnerHTML={{
+          __html: `
+            (function() {
+              // Always hide dev tools - persistent across sessions
+              const ALWAYS_HIDE_DEV_TOOLS = true;
+              
+              if (!ALWAYS_HIDE_DEV_TOOLS) return;
+              
+              function hideElement(el) {
+                if (!el || el.hidden) return;
+                try {
+                  el.style.cssText = 'display: none !important; visibility: hidden !important; opacity: 0 !important; pointer-events: none !important; height: 0 !important; width: 0 !important; position: absolute !important; left: -9999px !important; bottom: -9999px !important;';
+                  el.hidden = true;
+                  el.remove();
+                } catch(e) {
+                  // Silently fail if element is already removed
+                }
+              }
+              
+              function checkAndHide(element) {
+                if (!element || element === document.body || element === document.documentElement) return false;
+                
+                try {
+                  const style = window.getComputedStyle(element);
+                  const rect = element.getBoundingClientRect();
+                  const text = (element.textContent?.trim() || '').toUpperCase();
+                  
+                  // Check if element is in bottom-left corner
+                  const isBottomLeft = style.position === 'fixed' && 
+                                       rect.bottom < window.innerHeight && 
+                                       rect.bottom > window.innerHeight - 100 &&
+                                       rect.left < 100;
+                  
+                  // Check for common Next.js dev indicator patterns
+                  const isNextDev = element.id?.includes('__next') ||
+                                   element.id?.includes('nextjs') ||
+                                   element.className?.toString().includes('__next') ||
+                                   element.className?.toString().includes('nextjs') ||
+                                   element.getAttribute('data-nextjs-toast') ||
+                                   element.getAttribute('data-nextjs-dialog') ||
+                                   (text === 'N' && isBottomLeft) ||
+                                   (text.length <= 2 && isBottomLeft && (text === 'N' || text.includes('N'))) ||
+                                   (element.tagName === 'IFRAME' && element.src?.includes('__next'));
+                  
+                  if (isNextDev || (isBottomLeft && (text.length <= 3 || text === 'N'))) {
+                    hideElement(element);
+                    return true;
+                  }
+                } catch(e) {
+                  // Element might be detached, ignore
+                }
+                return false;
+              }
+              
+              function hideDevIndicator() {
+                try {
+                  // Check all body children
+                  Array.from(document.body.children).forEach(checkAndHide);
+                  
+                  // Check all elements with fixed position
+                  document.querySelectorAll('[style*="position: fixed"], [style*="position:fixed"]').forEach(checkAndHide);
+                  
+                  // Check all divs, spans, and other elements in bottom-left
+                  document.querySelectorAll('body > div, body > span, body > a, body > button').forEach(el => {
+                    try {
+                      const rect = el.getBoundingClientRect();
+                      const style = window.getComputedStyle(el);
+                      const text = (el.textContent?.trim() || '').toUpperCase();
+                      if (style.position === 'fixed' && 
+                          rect.bottom > window.innerHeight - 80 && 
+                          rect.left < 80 &&
+                          (text.length <= 3 || text === 'N' || el.id?.includes('next') || el.className?.toString().includes('next'))) {
+                        hideElement(el);
+                      }
+                    } catch(e) {
+                      // Ignore errors
+                    }
+                  });
+                } catch(e) {
+                  // Ignore errors
+                }
+              }
+              
+              // Use MutationObserver to catch elements as they're added
+              let observer;
+              try {
+                observer = new MutationObserver(function(mutations) {
+                  mutations.forEach(function(mutation) {
+                    mutation.addedNodes.forEach(function(node) {
+                      if (node.nodeType === 1) { // Element node
+                        checkAndHide(node);
+                        // Also check children
+                        if (node.querySelectorAll) {
+                          try {
+                            node.querySelectorAll('*').forEach(checkAndHide);
+                          } catch(e) {}
+                        }
+                      }
+                    });
+                  });
+                  hideDevIndicator();
+                });
+                
+                // Start observing
+                if (document.body) {
+                  observer.observe(document.body, {
+                    childList: true,
+                    subtree: true,
+                    attributes: false,
+                    characterData: false
+                  });
+                }
+              } catch(e) {
+                console.warn('MutationObserver not supported');
+              }
+              
+              // Initial hide - run multiple times
+              const runHide = () => {
+                hideDevIndicator();
+                if (document.readyState === 'loading') {
+                  document.addEventListener('DOMContentLoaded', hideDevIndicator);
+                }
+              };
+              
+              runHide();
+              
+              // Run on various events
+              document.addEventListener('DOMContentLoaded', hideDevIndicator);
+              window.addEventListener('load', hideDevIndicator);
+              window.addEventListener('resize', hideDevIndicator);
+              
+              // Run at multiple intervals
+              setTimeout(hideDevIndicator, 0);
+              setTimeout(hideDevIndicator, 50);
+              setTimeout(hideDevIndicator, 100);
+              setTimeout(hideDevIndicator, 200);
+              setTimeout(hideDevIndicator, 500);
+              setTimeout(hideDevIndicator, 1000);
+              setTimeout(hideDevIndicator, 2000);
+              
+              // Also run periodically as backup (every 100ms)
+              setInterval(hideDevIndicator, 100);
+            })();
+          `
+        }} />
       </body>
     </html>
   );

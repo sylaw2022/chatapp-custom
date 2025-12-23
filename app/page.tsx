@@ -207,7 +207,7 @@ export default function Home() {
   if (!currentUser) return <Auth onLogin={setCurrentUser} />
 
   return (
-    <main className="flex h-screen bg-black overflow-hidden relative">
+    <main className="flex h-screen bg-slate-900 overflow-hidden relative">
       {incomingCall && (
         <IncomingCall 
           caller={incomingCall.caller}

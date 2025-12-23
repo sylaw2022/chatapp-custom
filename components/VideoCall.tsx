@@ -25,6 +25,7 @@ interface Peer {
   stream: MediaStream;
   user: User;
   isLocal?: boolean;
+  updateKey?: number; // Force re-render when stream changes
 }
 
 interface VideoCallProps {
@@ -49,6 +50,10 @@ const VideoPlayer = ({ peer }: { peer: Peer }) => {
     const audioTracks = peer.stream.getAudioTracks();
     const currentTrackCount = { video: videoTracks.length, audio: audioTracks.length };
     
+    // Get track IDs to detect actual track changes
+    const videoTrackId = videoTracks[0]?.id || '';
+    const audioTrackId = audioTracks[0]?.id || '';
+    
     // Check if tracks changed
     const tracksChanged = 
       trackCountRef.current.video !== currentTrackCount.video ||
@@ -62,15 +67,182 @@ const VideoPlayer = ({ peer }: { peer: Peer }) => {
       trackCountRef.current = currentTrackCount;
     }
     
-    // Update video element
-    if (videoRef.current) {
-      // Always update srcObject to ensure it reflects current stream state
-      if (videoRef.current.srcObject !== peer.stream) {
-        videoRef.current.srcObject = peer.stream;
-        console.log(`📹 VideoPlayer: Updated video srcObject for peer ${peer.id}`);
+    // Update video element - ALWAYS update to force refresh
+    if (videoRef.current && peer.stream) {
+      const videoTracks = peer.stream.getVideoTracks();
+      const currentTrackId = videoTracks[0]?.id || '';
+      const currentSrcObject = videoRef.current.srcObject as MediaStream | null;
+      const currentTrackIdInVideo = (currentSrcObject?.getVideoTracks()[0]?.id) || '';
+      
+      // Track updateKey to detect when stream is reprocessed
+      const previousUpdateKey = (videoRef.current as any)._lastUpdateKey || 0;
+      const currentUpdateKey = peer.updateKey || 0;
+      
+      // Also check stream ID to detect when a new processed stream is created
+      const currentStreamId = peer.stream?.id || '';
+      const currentSrcObjectId = (currentSrcObject as MediaStream)?.id || '';
+      
+      // Always update if stream is different OR track ID is different OR updateKey changed OR stream ID changed
+      const needsUpdate = currentSrcObject !== peer.stream || 
+                         currentTrackIdInVideo !== currentTrackId ||
+                         previousUpdateKey !== currentUpdateKey ||
+                         currentStreamId !== currentSrcObjectId;
+      
+      if (needsUpdate) {
+        console.log(`📹 VideoPlayer: Updating video for peer ${peer.id}`, {
+          streamChanged: currentSrcObject !== peer.stream,
+          trackChanged: currentTrackIdInVideo !== currentTrackId,
+          updateKeyChanged: previousUpdateKey !== currentUpdateKey,
+          streamIdChanged: currentStreamId !== currentSrcObjectId,
+          oldTrackId: currentTrackIdInVideo,
+          newTrackId: currentTrackId,
+          oldStreamId: currentSrcObjectId,
+          newStreamId: currentStreamId,
+          previousUpdateKey,
+          currentUpdateKey
+        });
+        
+        // Store current updateKey on video element to track changes
+        (videoRef.current as any)._lastUpdateKey = currentUpdateKey;
+        
+        // Force update by clearing first
+        try {
+          videoRef.current.pause();
+          // Remove event listeners to prevent errors
+          videoRef.current.onerror = null;
+          videoRef.current.onabort = null;
+          videoRef.current.srcObject = null;
+          // Don't call load() as it can cause DOMException on subsequent calls
+          // Instead, just clear srcObject and wait a bit before setting new one
+        } catch (e) {
+          console.warn('⚠️ Error clearing video element:', e);
+        }
+        
+        // Then set new stream after a delay to ensure previous stream is cleared
+        const setStream = async () => {
+          if (videoRef.current && peer.stream) {
+            try {
+              // Check if the stream track is ready (especially important for canvas streams)
+              const videoTrack = peer.stream.getVideoTracks()[0];
+              if (videoTrack) {
+                // Wait a bit if track is not live yet (canvas streams need time to start)
+                const currentState = String(videoTrack.readyState);
+                if (currentState !== 'live') {
+                  console.log(`⏳ VideoPlayer: Waiting for video track to be live (current state: ${currentState})`);
+                  let waitCount = 0;
+                  while (waitCount < 20) {
+                    await new Promise(resolve => setTimeout(resolve, 50));
+                    const checkState = String(videoTrack.readyState);
+                    if (checkState === 'live') {
+                      console.log(`✅ VideoPlayer: Video track is now live`);
+                      break;
+                    }
+                    waitCount++;
+                  }
+                  const finalState = String(videoTrack.readyState);
+                  if (finalState !== 'live') {
+                    console.warn(`⚠️ VideoPlayer: Video track not live after waiting (state: ${finalState})`);
+                  }
+                }
+              }
+              
+              // Check if video element has an abort error
+              if (videoRef.current.error && 
+                  videoRef.current.error.code === MediaError.MEDIA_ERR_ABORTED) {
+                // Video was aborted, need to reset it
+                console.log('🔄 VideoPlayer: Video element was aborted, resetting...');
+                videoRef.current.load();
+                // Wait a bit more after load before setting new stream
+                await new Promise(resolve => setTimeout(resolve, 100));
+                if (videoRef.current && peer.stream) {
+                  try {
+                    videoRef.current.srcObject = peer.stream;
+                    videoRef.current.play().catch(e => {
+                      // Ignore AbortError and NotAllowedError as they're expected
+                      if (e.name !== 'AbortError' && e.name !== 'NotAllowedError') {
+                        console.warn('📹 VideoPlayer: Video play failed after reset:', e);
+                      }
+                    });
+                    console.log(`📹 VideoPlayer: Set new stream for peer ${peer.id} after reset, track ID:`, peer.stream.getVideoTracks()[0]?.id);
+                  } catch (e) {
+                    console.warn('📹 VideoPlayer: Error setting stream after reset:', e);
+                  }
+                }
+              } else {
+                // Set the stream
+                videoRef.current.srcObject = peer.stream;
+                
+                // Force the video element to recognize the new stream
+                // This is especially important for canvas streams which need time to start
+                if (videoRef.current.readyState === 0) {
+                  // If video hasn't loaded yet, wait for it
+                  await new Promise((resolve) => {
+                    const checkReady = () => {
+                      if (videoRef.current && videoRef.current.readyState >= 2) {
+                        resolve(null);
+                      } else {
+                        setTimeout(checkReady, 50);
+                      }
+                    };
+                    checkReady();
+                    // Timeout after 2 seconds
+                    setTimeout(() => resolve(null), 2000);
+                  });
+                }
+                
+                // Wait a bit before playing to ensure stream is ready
+                await new Promise(resolve => setTimeout(resolve, 100));
+                
+                // Try to play the video
+                try {
+                  await videoRef.current.play();
+                  console.log(`✅ VideoPlayer: Video playing for peer ${peer.id}`);
+                } catch (e: any) {
+                  // Ignore AbortError and NotAllowedError as they're expected during cleanup/autoplay
+                  if (e.name !== 'AbortError' && e.name !== 'NotAllowedError') {
+                    console.warn('📹 VideoPlayer: Video play failed:', e);
+                  }
+                }
+                
+                console.log(`📹 VideoPlayer: Set new stream for peer ${peer.id}, track ID:`, peer.stream.getVideoTracks()[0]?.id, 'track readyState:', videoTrack?.readyState, 'video readyState:', videoRef.current.readyState);
+                
+                // Force periodic checks to ensure the video is displaying the correct stream
+                // This is especially important for canvas streams which may take time to start
+                const checkInterval = setInterval(() => {
+                  if (!videoRef.current || !peer.stream) {
+                    clearInterval(checkInterval);
+                    return;
+                  }
+                  
+                  const currentSrc = videoRef.current.srcObject as MediaStream | null;
+                  const expectedStreamId = peer.stream.id;
+                  const currentStreamId = (currentSrc as MediaStream)?.id || '';
+                  
+                  if (currentStreamId !== expectedStreamId) {
+                    console.log('🔄 VideoPlayer: Periodic check - stream mismatch detected, forcing update...', {
+                      expected: expectedStreamId,
+                      current: currentStreamId
+                    });
+                    videoRef.current.srcObject = peer.stream;
+                    videoRef.current.play().catch(() => {});
+                  }
+                }, 500);
+                
+                // Clear interval after 5 seconds (10 checks)
+                setTimeout(() => clearInterval(checkInterval), 5000);
+              }
+            } catch (e) {
+              console.warn('📹 VideoPlayer: Error setting stream:', e);
+            }
+          }
+        };
+        
+        // Set after delay to ensure previous stream is cleared
+        setStream();
+      } else {
+        // Even if same, force play to ensure it's active
+        videoRef.current.play().catch(e => console.warn('Video play failed:', e));
       }
-      // Force video to play
-      videoRef.current.play().catch(e => console.warn('Video play failed:', e));
     }
     
     // CRITICAL: Add audio element for remote streams to hear audio
@@ -86,13 +258,17 @@ const VideoPlayer = ({ peer }: { peer: Peer }) => {
       audioRef.current.play().catch(e => console.warn('Audio play failed:', e));
       console.log(`Audio element set for remote peer ${peer.id}, tracks:`, audioTracks.length);
     }
-  }, [peer.stream, peer.isLocal, peer.id]);
+  }, [peer.stream, peer.isLocal, peer.id, peer.stream?.getVideoTracks()[0]?.id, peer.updateKey, peer.stream?.id]);
 
   const isVideoEnabled = peer.stream?.getVideoTracks().some(track => track.readyState === 'live' && track.enabled);
+  const videoTrackId = peer.stream?.getVideoTracks()[0]?.id || '';
+  const streamId = peer.stream?.id || '';
+  const updateKey = peer.updateKey || 0;
 
   return (
-    <div className="relative aspect-video bg-gray-800 rounded-lg overflow-hidden border border-gray-700 shadow-inner flex items-center justify-center">
+    <div className="relative aspect-video bg-slate-700 rounded-lg overflow-hidden border border-slate-600 shadow-inner flex items-center justify-center">
       <video
+        key={`video-${peer.id}-${videoTrackId}-${streamId}-${updateKey}`}
         ref={videoRef}
         autoPlay
         playsInline
@@ -111,7 +287,7 @@ const VideoPlayer = ({ peer }: { peer: Peer }) => {
       {!isVideoEnabled && (
         <div className="flex flex-col items-center gap-2">
           {peer.user?.avatar && <img src={peer.user.avatar} className="w-16 h-16 rounded-full border-2 border-blue-500" alt={peer.user.nickname} />}
-          <span className="text-sm text-gray-300">{peer.isLocal ? 'You' : peer.user?.nickname}</span>
+          <span className="text-sm text-slate-200">{peer.isLocal ? 'You' : peer.user?.nickname}</span>
         </div>
       )}
       <div className="absolute bottom-2 left-2 bg-black bg-opacity-50 text-white text-xs px-2 py-1 rounded flex items-center gap-1">
@@ -143,10 +319,16 @@ export default function VideoCall({ currentUser, activeChat, isGroup, incomingMo
   const [peers, setPeers] = useState<Map<number, Peer>>(new Map());
   const [isMicMuted, setIsMicMuted] = useState(false);
   const [isCameraOff, setIsCameraOff] = useState(false);
-  const [selectedBackground, setSelectedBackground] = useState<string>('none');
-  const [showBackgroundSelector, setShowBackgroundSelector] = useState(false);
+  // Initialize selectedBackground from localStorage synchronously to avoid race conditions
+  const [selectedBackground, setSelectedBackground] = useState<string>(() => {
+    if (typeof window !== 'undefined') {
+      const saved = localStorage.getItem('selectedBackground');
+      return saved || 'none';
+    }
+    return 'none';
+  });
   const [userBackgrounds, setUserBackgrounds] = useState<Array<{ id: string; name: string; url: string }>>([]);
-  const [previewBackground, setPreviewBackground] = useState<string | null>(null);
+  const [streamUpdateKey, setStreamUpdateKey] = useState(0); // Force re-render when stream changes
   
   const localStream = useRef<MediaStream | null>(null);
   const processedStreamRef = useRef<MediaStream | null>(null); // Processed stream with background
@@ -154,7 +336,6 @@ export default function VideoCall({ currentUser, activeChat, isGroup, incomingMo
   const videoElementRef = useRef<HTMLVideoElement | null>(null);
   const animationFrameRef = useRef<number | null>(null);
   const backgroundImageRef = useRef<HTMLImageElement | null>(null);
-  const backgroundSelectorRef = useRef<HTMLDivElement | null>(null);
   const selfieSegmentationRef = useRef<any | null>(null);
   const latestSegmentationResultsRef = useRef<any | null>(null); // Store latest segmentation results
   const peerConnections = useRef<Map<number, RTCPeerConnection>>(new Map());
@@ -186,8 +367,6 @@ export default function VideoCall({ currentUser, activeChat, isGroup, incomingMo
     setPeers(new Map());
     setIsMicMuted(false);
     setIsCameraOff(false);
-    setShowBackgroundSelector(false);
-    setPreviewBackground(null);
     
     // Clear refs
     peerConnections.current.forEach(pc => pc.close());
@@ -295,29 +474,62 @@ export default function VideoCall({ currentUser, activeChat, isGroup, incomingMo
     }
   }, [incomingMode, callState, callType, peers.size, resetCallState]);
 
-  // Close background selector when clicking outside
+  // Track previous selectedBackground to detect changes
+  const prevSelectedBackgroundRef = useRef<string>(selectedBackground);
+  
+  // Load selected background from localStorage on mount and when it changes
   useEffect(() => {
-    if (!showBackgroundSelector) return;
+    const loadSelectedBackground = () => {
+      const saved = localStorage.getItem('selectedBackground') || 'none';
+      if (saved !== prevSelectedBackgroundRef.current) {
+        prevSelectedBackgroundRef.current = saved;
+        setSelectedBackground(saved);
+      }
+    };
     
-    const handleClickOutside = (event: MouseEvent) => {
-      if (backgroundSelectorRef.current) {
-        const target = event.target as HTMLElement;
-        if (!backgroundSelectorRef.current.contains(target)) {
-          setShowBackgroundSelector(false);
+    // Load immediately on mount
+    loadSelectedBackground();
+    
+    // Listen for storage changes (when background is changed in Settings from another tab)
+    const handleStorageChange = (e: StorageEvent) => {
+      if (e.key === 'selectedBackground') {
+        const newValue = e.newValue || 'none';
+        if (newValue !== prevSelectedBackgroundRef.current) {
+          prevSelectedBackgroundRef.current = newValue;
+          setSelectedBackground(newValue);
+          // If call is active, apply the new background immediately
+          if (callType === 'video' && (callState === 'active' || callState === 'calling') && localStream.current) {
+            handleBackgroundChange(newValue);
+          }
         }
       }
     };
     
-    // Delay to avoid immediate closure on button click
-    const timeoutId = setTimeout(() => {
-      document.addEventListener('mousedown', handleClickOutside);
-    }, 100);
+    window.addEventListener('storage', handleStorageChange);
+    
+    // Also check periodically in case of same-tab updates (Settings modal in same tab)
+    const interval = setInterval(() => {
+      const saved = localStorage.getItem('selectedBackground') || 'none';
+      if (saved !== prevSelectedBackgroundRef.current) {
+        prevSelectedBackgroundRef.current = saved;
+        setSelectedBackground(saved);
+        // If call is active, apply the new background immediately
+        if (callType === 'video' && (callState === 'active' || callState === 'calling') && localStream.current) {
+          handleBackgroundChange(saved);
+        }
+      }
+    }, 300); // Check more frequently for better responsiveness
     
     return () => {
-      clearTimeout(timeoutId);
-      document.removeEventListener('mousedown', handleClickOutside);
+      window.removeEventListener('storage', handleStorageChange);
+      clearInterval(interval);
     };
-  }, [showBackgroundSelector]);
+  }, [callType, callState]);
+  
+  // Update ref when selectedBackground changes
+  useEffect(() => {
+    prevSelectedBackgroundRef.current = selectedBackground;
+  }, [selectedBackground]);
   
   // Load user backgrounds from localStorage on mount and when it changes
   useEffect(() => {
@@ -506,10 +718,18 @@ export default function VideoCall({ currentUser, activeChat, isGroup, incomingMo
         }
         // Pause and clear video element before nulling
         videoElementRef.current.pause();
+        // Remove all event listeners to prevent errors
+        videoElementRef.current.onloadedmetadata = null;
+        videoElementRef.current.onerror = null;
         videoElementRef.current.srcObject = null;
         videoElementRef.current.load(); // Reset video element
+        // Abort any ongoing media loading
+        if (videoElementRef.current.src) {
+          videoElementRef.current.src = '';
+        }
       } catch (e) {
         // Ignore errors during cleanup
+        console.warn('⚠️ Error during video element cleanup:', e);
       }
       videoElementRef.current = null;
     }
@@ -521,6 +741,22 @@ export default function VideoCall({ currentUser, activeChat, isGroup, incomingMo
       canvasRef.current = null;
     }
     
+    // Cleanup background image to prevent DOMException on subsequent calls
+    if (backgroundImageRef.current) {
+      try {
+        // Remove event listeners to prevent errors
+        backgroundImageRef.current.onload = null;
+        backgroundImageRef.current.onerror = null;
+        // Abort any ongoing image load by setting src to empty string
+        if (backgroundImageRef.current.src) {
+          backgroundImageRef.current.src = '';
+        }
+      } catch (e) {
+        console.warn('⚠️ Error during background image cleanup:', e);
+      }
+      backgroundImageRef.current = null;
+    }
+    
     // Stop processed stream tracks
     if (processedStreamRef.current) {
       processedStreamRef.current.getTracks().forEach(track => {
@@ -529,6 +765,12 @@ export default function VideoCall({ currentUser, activeChat, isGroup, incomingMo
       });
       processedStreamRef.current = null;
     }
+    
+    // Reset MediaPipe segmentation results to prevent stale data on next call
+    latestSegmentationResultsRef.current = null;
+    
+    // Note: We don't reset selfieSegmentationRef.current because MediaPipe can be reused
+    // across calls for better performance. It will be reinitialized if needed.
     
     // Stop local stream tracks
     if (localStream.current) {
@@ -574,28 +816,85 @@ export default function VideoCall({ currentUser, activeChat, isGroup, incomingMo
 
   // --- BACKGROUND PROCESSING ---
   const processVideoWithBackground = useCallback(async (stream: MediaStream, backgroundId: string): Promise<MediaStream> => {
-    console.log('🎨 Processing video with background:', backgroundId, 'Available backgrounds:', userBackgrounds.length);
+    // Log the backgroundId parameter to verify it's correct
+    console.log('🎨 [PROCESS VIDEO] Called with backgroundId:', backgroundId, 'stream ID:', stream.id);
+    
+    // Always get the latest backgrounds from localStorage to ensure we have user-uploaded backgrounds
+    let latestUserBackgrounds: Array<{ id: string; name: string; url: string }> = [];
+    try {
+      const saved = localStorage.getItem('userBackgrounds');
+      if (saved) {
+        latestUserBackgrounds = JSON.parse(saved);
+      }
+    } catch (e) {
+      console.warn('Failed to load user backgrounds from localStorage:', e);
+    }
+    
+    console.log('🎨 [PROCESS VIDEO] Processing video with background:', backgroundId, 'Available backgrounds:', latestUserBackgrounds.length);
+    console.log('📊 [PROCESS VIDEO] Input stream has', stream.getVideoTracks().length, 'video tracks');
     
     if (backgroundId === 'none') {
-      console.log('⏭️ No background selected, returning original stream');
+      console.log('⏭️ [PROCESS VIDEO] No background selected, returning original stream');
       return stream; // Return original stream if no background
     }
+    
+    console.log('✅ [PROCESS VIDEO] Background ID is valid, proceeding with processing...');
 
     // Stop any existing processing
     if (animationFrameRef.current) {
-      console.log('🛑 Stopping existing animation frame before starting new processing');
+      console.log('🛑 [PROCESS VIDEO] Stopping existing animation frame before starting new processing');
       cancelAnimationFrame(animationFrameRef.current);
       animationFrameRef.current = null;
     }
     
-    // Also stop processing if there's an old video element with stopProcessing function
-    if (videoElementRef.current && (videoElementRef.current as any)._stopProcessing) {
-      console.log('🛑 Stopping old processing session before starting new one');
+    // Cleanup old video element and background image before starting new processing
+    if (videoElementRef.current) {
+      console.log('🛑 [PROCESS VIDEO] Cleaning up old video element');
       try {
-        (videoElementRef.current as any)._stopProcessing();
+        const stopProcessing = (videoElementRef.current as any)?._stopProcessing;
+        if (stopProcessing && typeof stopProcessing === 'function') {
+          stopProcessing();
+        }
+        videoElementRef.current.pause();
+        videoElementRef.current.onloadedmetadata = null;
+        videoElementRef.current.onerror = null;
+        videoElementRef.current.srcObject = null;
+        if (videoElementRef.current.src) {
+          videoElementRef.current.src = '';
+        }
       } catch (e) {
-        // Ignore errors - old processing might already be stopped
+        console.warn('⚠️ [PROCESS VIDEO] Error cleaning up old video element:', e);
       }
+      videoElementRef.current = null;
+    }
+    
+    // Cleanup old background image to prevent DOMException
+    if (backgroundImageRef.current) {
+      console.log('🛑 [PROCESS VIDEO] Cleaning up old background image');
+      try {
+        backgroundImageRef.current.onload = null;
+        backgroundImageRef.current.onerror = null;
+        if (backgroundImageRef.current.src) {
+          backgroundImageRef.current.src = ''; // Abort any ongoing load
+        }
+      } catch (e) {
+        console.warn('⚠️ [PROCESS VIDEO] Error cleaning up old background image:', e);
+      }
+      backgroundImageRef.current = null;
+    }
+    
+    // Cleanup old canvas
+    if (canvasRef.current) {
+      console.log('🛑 [PROCESS VIDEO] Cleaning up old canvas');
+      try {
+        const ctx = canvasRef.current.getContext('2d');
+        if (ctx) {
+          ctx.clearRect(0, 0, canvasRef.current.width, canvasRef.current.height);
+        }
+      } catch (e) {
+        console.warn('⚠️ [PROCESS VIDEO] Error cleaning up old canvas:', e);
+      }
+      canvasRef.current = null;
     }
 
     // Initialize MediaPipe Selfie Segmentation if not already initialized
@@ -630,7 +929,10 @@ export default function VideoCall({ currentUser, activeChat, isGroup, incomingMo
           // This callback will persist across multiple calls
           selfieSegmentationRef.current.onResults((results: any) => {
             latestSegmentationResultsRef.current = results;
-            console.log('📊 [MediaPipe] Received segmentation results, mask available:', !!results?.segmentationMask);
+            // Log occasionally to avoid spam (log ~10% of results)
+            if (Math.random() < 0.1) {
+              console.log('📊 [MediaPipe] Received segmentation results, mask available:', !!results?.segmentationMask, 'mask width:', results?.segmentationMask?.width, 'mask height:', results?.segmentationMask?.height);
+            }
           });
           
           console.log('✅ MediaPipe Selfie Segmentation initialized and ready with callback set up');
@@ -649,12 +951,17 @@ export default function VideoCall({ currentUser, activeChat, isGroup, incomingMo
       console.log('🔄 Ensuring MediaPipe results callback is set up for new call');
       selfieSegmentationRef.current.onResults((results: any) => {
         latestSegmentationResultsRef.current = results;
-        console.log('📊 [MediaPipe] Received segmentation results, mask available:', !!results?.segmentationMask);
+        // Log occasionally to avoid spam (log ~10% of results)
+        if (Math.random() < 0.1) {
+          console.log('📊 [MediaPipe] Received segmentation results, mask available:', !!results?.segmentationMask, 'mask width:', results?.segmentationMask?.width, 'mask height:', results?.segmentationMask?.height);
+        }
       });
     }
     
     // Reset results for new processing session
+    // This ensures we don't use stale segmentation results from previous calls
     latestSegmentationResultsRef.current = null;
+    console.log('🔄 Reset segmentation results for new processing session');
 
     const video = document.createElement('video');
     video.srcObject = stream;
@@ -662,15 +969,37 @@ export default function VideoCall({ currentUser, activeChat, isGroup, incomingMo
     video.playsInline = true;
     video.muted = true; // Mute to prevent feedback
     
-    // Wait for video to be ready
+    // Add error handler to catch abort errors gracefully
+    video.onerror = (e) => {
+      const error = video.error;
+      if (error && error.code === MediaError.MEDIA_ERR_ABORTED) {
+        console.log('ℹ️ [PROCESS VIDEO] Video load was aborted (expected during cleanup)');
+      } else {
+        console.warn('⚠️ [PROCESS VIDEO] Video error:', error);
+      }
+    };
+    
+    video.onabort = () => {
+      console.log('ℹ️ [PROCESS VIDEO] Video load was aborted (expected during cleanup)');
+    };
+    
+    // Wait for video to be ready and playing
     await new Promise((resolve) => {
-      const onLoadedMetadata = () => {
-        video.play().then(() => {
-          // Wait a bit more for video dimensions to be available
+      const onLoadedMetadata = async () => {
+        try {
+          await video.play();
+          // Wait a bit more for video dimensions to be available and video to start playing
           setTimeout(() => {
+            console.log('✅ [PROCESS VIDEO] Video is playing, readyState:', video.readyState, 'paused:', video.paused, 'dimensions:', video.videoWidth, 'x', video.videoHeight);
             resolve(null);
-          }, 100);
-        }).catch(resolve);
+          }, 200);
+        } catch (error: any) {
+          // Ignore AbortError as it's expected during cleanup
+          if (error.name !== 'AbortError') {
+            console.warn('⚠️ [PROCESS VIDEO] Video play() failed, continuing anyway:', error);
+          }
+          resolve(null);
+        }
       };
       
       if (video.readyState >= 1) {
@@ -697,45 +1026,105 @@ export default function VideoCall({ currentUser, activeChat, isGroup, incomingMo
     console.log('Processing video with background:', backgroundId, 'Dimensions:', videoWidth, 'x', videoHeight);
 
     // Get background from all available backgrounds (predefined + user uploaded)
-    const allBackgrounds = [...BACKGROUND_OPTIONS, ...userBackgrounds];
+    // Use latestUserBackgrounds from localStorage to ensure we have the most recent uploads
+    const allBackgrounds = [...BACKGROUND_OPTIONS, ...latestUserBackgrounds];
     const backgroundOption = allBackgrounds.find(bg => bg.id === backgroundId);
     
-    console.log('🔍 Background option found:', backgroundOption ? { id: backgroundOption.id, name: backgroundOption.name, hasUrl: !!backgroundOption.url } : 'NOT FOUND');
+    console.log('🔍 Background lookup:', {
+      backgroundId,
+      totalBackgrounds: allBackgrounds.length,
+      predefinedCount: BACKGROUND_OPTIONS.length,
+      userUploadedCount: latestUserBackgrounds.length,
+      found: !!backgroundOption,
+      optionDetails: backgroundOption ? { id: backgroundOption.id, name: backgroundOption.name, hasUrl: !!backgroundOption.url, url: backgroundOption.url } : null
+    });
+    
+    if (!backgroundOption) {
+      console.error('❌ Background option not found for ID:', backgroundId);
+      console.log('Available background IDs:', allBackgrounds.map(bg => bg.id));
+      return stream; // Return original stream if background not found
+    }
     
     // Load background image if needed
     let bgImage: HTMLImageElement | null = null;
-    if (backgroundOption?.url && backgroundOption.url !== 'blur') {
-      console.log('📷 Loading background image from URL:', backgroundOption.url);
+    if (backgroundOption.url && backgroundOption.url !== 'blur') {
+      console.log('📷 [PROCESS VIDEO] Loading background image from URL:', backgroundOption.url);
       bgImage = new Image();
       bgImage.crossOrigin = 'anonymous';
       
       // Store in ref for potential reuse
       backgroundImageRef.current = bgImage;
       
-      await new Promise((resolve, reject) => {
+      const imageLoaded = await new Promise<boolean>((resolve) => {
+        let isResolved = false; // Prevent multiple resolutions
         const timeout = setTimeout(() => {
-          console.warn('⏱️ Background image loading timeout');
-          resolve(null); // Continue without background image
+          if (!isResolved) {
+            isResolved = true;
+            console.warn('⏱️ [PROCESS VIDEO] Background image loading timeout after 5 seconds');
+            // Clean up event listeners
+            bgImage!.onload = null;
+            bgImage!.onerror = null;
+            resolve(false); // Image failed to load in time
+          }
         }, 5000); // 5 second timeout
         
         bgImage!.onload = () => {
-          clearTimeout(timeout);
-          console.log('✅ Background image loaded successfully, dimensions:', bgImage!.naturalWidth, 'x', bgImage!.naturalHeight);
-          console.log('✅ Background image complete:', bgImage!.complete, 'naturalWidth:', bgImage!.naturalWidth, 'naturalHeight:', bgImage!.naturalHeight);
-          resolve(null);
+          if (!isResolved) {
+            isResolved = true;
+            clearTimeout(timeout);
+            if (bgImage!.naturalWidth > 0 && bgImage!.naturalHeight > 0) {
+              console.log('✅ [PROCESS VIDEO] Background image loaded successfully, dimensions:', bgImage!.naturalWidth, 'x', bgImage!.naturalHeight);
+              console.log('✅ [PROCESS VIDEO] Background image complete:', bgImage!.complete, 'naturalWidth:', bgImage!.naturalWidth, 'naturalHeight:', bgImage!.naturalHeight);
+              resolve(true);
+            } else {
+              console.warn('⚠️ [PROCESS VIDEO] Background image loaded but has invalid dimensions');
+              resolve(false);
+            }
+          }
         };
         bgImage!.onerror = (error) => {
-          clearTimeout(timeout);
-          console.error('❌ Failed to load background image:', error, 'URL:', backgroundOption.url);
-          resolve(null); // Continue without background image
+          if (!isResolved) {
+            isResolved = true;
+            clearTimeout(timeout);
+            // Check if it's an abort error (which is expected during cleanup)
+            const errorEvent = error as ErrorEvent;
+            if (errorEvent && errorEvent.type === 'error') {
+              console.error('❌ [PROCESS VIDEO] Failed to load background image:', errorEvent, 'URL:', backgroundOption.url);
+            } else {
+              console.error('❌ [PROCESS VIDEO] Failed to load background image:', error, 'URL:', backgroundOption.url);
+            }
+            // Clean up event listeners
+            bgImage!.onload = null;
+            bgImage!.onerror = null;
+            resolve(false); // Image failed to load
+          }
         };
-        bgImage!.src = backgroundOption.url!;
+        
+        // Set src after event listeners are attached
+        try {
+          bgImage!.src = backgroundOption.url;
+        } catch (e) {
+          if (!isResolved) {
+            isResolved = true;
+            clearTimeout(timeout);
+            console.error('❌ [PROCESS VIDEO] Error setting image src:', e);
+            bgImage!.onload = null;
+            bgImage!.onerror = null;
+            resolve(false);
+          }
+        }
       });
+      
+      if (!imageLoaded) {
+        console.warn('⚠️ [PROCESS VIDEO] Background image failed to load, will use fallback');
+        bgImage = null;
+        backgroundImageRef.current = null;
+      }
     } else if (backgroundId === 'blur') {
-      console.log('🌫️ Using blur effect for background');
+      console.log('🌫️ [PROCESS VIDEO] Using blur effect for background');
       backgroundImageRef.current = null;
     } else {
-      console.log('⚠️ No background URL or blur effect for backgroundId:', backgroundId);
+      console.log('⚠️ [PROCESS VIDEO] No background URL or blur effect for backgroundId:', backgroundId);
       backgroundImageRef.current = null;
     }
 
@@ -750,10 +1139,15 @@ export default function VideoCall({ currentUser, activeChat, isGroup, incomingMo
 
     // Flag to track if processing is still active (used to stop animation loop)
     let isProcessingActive = true;
+    let firstFrameDrawn = false; // Track when first frame is drawn
+    let maskFormatDetected = false; // Track if we've detected the mask format
+    let useDestinationOut = false; // Whether to use destination-out (for inverted masks)
+    let framesWithMask = 0; // Count frames where we have a mask (for delayed detection)
 
     const drawFrame = () => {
       // Stop animation loop if processing is no longer active or video is disposed
       if (!isProcessingActive || !video || video.readyState === video.HAVE_NOTHING) {
+        console.log('🛑 [DRAW FRAME] Stopping animation loop - isProcessingActive:', isProcessingActive, 'video:', !!video, 'readyState:', video?.readyState);
         animationFrameRef.current = null;
         return;
       }
@@ -761,6 +1155,23 @@ export default function VideoCall({ currentUser, activeChat, isGroup, incomingMo
       if (!ctx || video.readyState !== video.HAVE_ENOUGH_DATA) {
         animationFrameRef.current = requestAnimationFrame(drawFrame);
         return;
+      }
+      
+      // Clear canvas at the start of each frame to prevent artifacts from previous frames
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      
+      // Reset compositing mode and alpha to defaults
+      ctx.globalCompositeOperation = 'source-over';
+      ctx.globalAlpha = 1.0;
+      
+      // Log that we're drawing frames (but not every frame to avoid spam)
+      if (Math.random() < 0.01) { // Log ~1% of frames
+        console.log('🎨 [DRAW FRAME] Drawing frame, video readyState:', video.readyState, 'bgImage:', bgImage ? 'loaded' : 'none', 'MediaPipe:', !!selfieSegmentationRef.current);
+      }
+      
+      // Mark that we've drawn at least one frame
+      if (!firstFrameDrawn) {
+        firstFrameDrawn = true;
       }
 
       // For blur effect
@@ -775,8 +1186,13 @@ export default function VideoCall({ currentUser, activeChat, isGroup, incomingMo
         const x = (canvas.width - canvas.width * scale) / 2;
         const y = (canvas.height - canvas.height * scale) / 2;
         ctx.drawImage(video, x, y, canvas.width * scale, canvas.height * scale);
-      } else if (bgImage && bgImage.complete && bgImage.naturalWidth > 0) {
-        // Draw background image first
+      } else if (bgImage && bgImage.complete && bgImage.naturalWidth > 0 && bgImage.naturalHeight > 0) {
+        // Draw background image first (this will be behind the person)
+        // Ensure we're using source-over to draw the background normally
+        ctx.globalCompositeOperation = 'source-over';
+        ctx.globalAlpha = 1.0;
+        
+        // Fill with black first
         ctx.fillStyle = '#000000';
         ctx.fillRect(0, 0, canvas.width, canvas.height);
         
@@ -811,20 +1227,36 @@ export default function VideoCall({ currentUser, activeChat, isGroup, incomingMo
               selfieSegmentationRef.current.send({ image: video }).catch((error: any) => {
                 // Only log if it's not the "object no longer usable" error (which can happen during cleanup)
                 if (error.name !== 'InvalidStateError' && !error.message?.includes('no longer, usable')) {
-                  console.error('❌ MediaPipe send error:', error);
+                  console.error('❌ [DRAW FRAME] MediaPipe send error:', error);
                 }
               });
+              // Log occasionally to verify MediaPipe is being called
+              if (Math.random() < 0.01) {
+                console.log('📤 [DRAW FRAME] Sent frame to MediaPipe, video dimensions:', video.videoWidth, 'x', video.videoHeight);
+              }
             } catch (error: any) {
               // Silently handle errors during cleanup or when video is disposed
               if (error.name !== 'InvalidStateError' && !error.message?.includes('no longer, usable')) {
-                console.error('❌ MediaPipe send exception:', error);
+                console.error('❌ [DRAW FRAME] MediaPipe send exception:', error);
               }
+            }
+          } else {
+            // Log occasionally if video isn't ready
+            if (Math.random() < 0.01) {
+              console.warn('⚠️ [DRAW FRAME] Video not ready for MediaPipe, readyState:', video.readyState, 'dimensions:', video.videoWidth, 'x', video.videoHeight);
             }
           }
           
           // Process the latest results from callback (stored in ref)
           const results = latestSegmentationResultsRef.current;
           if (results && results.segmentationMask) {
+            // Increment counter when we have a mask (for delayed detection)
+            framesWithMask++;
+            
+            // Log when we successfully use segmentation results (but not every frame to avoid spam)
+            if (Math.random() < 0.01) { // Log ~1% of frames
+              console.log('✅ [DRAW FRAME] Using MediaPipe segmentation mask, framesWithMask:', framesWithMask);
+            }
             // Get segmentation mask (this is a canvas element)
             const mask = results.segmentationMask;
             
@@ -835,16 +1267,115 @@ export default function VideoCall({ currentUser, activeChat, isGroup, incomingMo
             const personCtx = personCanvas.getContext('2d');
             
             if (personCtx) {
-              // Draw video to temporary canvas
+              // MediaPipe segmentation mask: typically white = person, black = background
+              // But some versions may be inverted. We'll use destination-in which should work
+              // for standard masks. If background appears on top, the mask might be inverted.
+              
+              // Clear canvas first
+              personCtx.clearRect(0, 0, personCanvas.width, personCanvas.height);
+              
+              // Draw the full video first
+              personCtx.globalCompositeOperation = 'source-over';
               personCtx.drawImage(video, 0, 0, personCanvas.width, personCanvas.height);
               
-              // Apply mask to keep only the person
-              // destination-in: keeps existing content where mask is opaque
-              personCtx.globalCompositeOperation = 'destination-in';
-              personCtx.drawImage(mask, 0, 0, personCanvas.width, personCanvas.height);
+              // Apply mask to extract person from video
+              // MediaPipe mask format: white = person (foreground), black = background (standard)
+              // However, if background appears on top, the mask might be inverted
+              // Detect mask format once per processing session, then reuse
               
-              // Now composite: background is already drawn, draw person on top
+              // Detect mask format only once (wait for at least 3 frames with mask to ensure it's stable)
+              // This prevents false detection on the first frame when mask might not be ready
+              // Especially important for subsequent calls where mask might initialize differently
+              if (!maskFormatDetected && firstFrameDrawn && framesWithMask >= 3) {
+                // Try destination-in first (standard MediaPipe: white = person)
+                personCtx.globalCompositeOperation = 'destination-in';
+                personCtx.drawImage(mask, 0, 0, personCanvas.width, personCanvas.height);
+                
+                // Check if we got any content (sample multiple regions for better detection)
+                const regions = [
+                  { x: Math.floor(personCanvas.width * 0.4), y: Math.floor(personCanvas.height * 0.3), w: Math.min(80, personCanvas.width / 5), h: Math.min(80, personCanvas.height / 5) }, // Upper center
+                  { x: Math.floor(personCanvas.width * 0.4), y: Math.floor(personCanvas.height * 0.5), w: Math.min(80, personCanvas.width / 5), h: Math.min(80, personCanvas.height / 5) }, // Center
+                  { x: Math.floor(personCanvas.width * 0.4), y: Math.floor(personCanvas.height * 0.7), w: Math.min(80, personCanvas.width / 5), h: Math.min(80, personCanvas.height / 5) }, // Lower center
+                ];
+                
+                let totalContentPixels = 0;
+                let totalPixels = 0;
+                
+                for (const region of regions) {
+                  try {
+                    const imageData = personCtx.getImageData(region.x, region.y, region.w, region.h);
+                    // Check alpha channel (index 3 in RGBA)
+                    for (let i = 3; i < imageData.data.length; i += 4) {
+                      totalPixels++;
+                      if (imageData.data[i] > 30) { // Has some opacity
+                        totalContentPixels++;
+                      }
+                    }
+                  } catch (e) {
+                    // Skip region if we can't sample it
+                  }
+                }
+                
+                // If less than 5% of pixels have content, mask is likely inverted
+                const contentRatio = totalPixels > 0 ? totalContentPixels / totalPixels : 0;
+                
+                if (contentRatio < 0.05) {
+                  // Mask is likely inverted - use destination-out
+                  useDestinationOut = true;
+                  console.log('🔄 [DRAW FRAME] Detected inverted mask format (content ratio:', contentRatio.toFixed(3), '), using destination-out');
+                } else {
+                  console.log('✅ [DRAW FRAME] Using standard mask format (content ratio:', contentRatio.toFixed(3), '), using destination-in');
+                }
+                maskFormatDetected = true;
+                
+                // Redraw with correct format
+                personCtx.clearRect(0, 0, personCanvas.width, personCanvas.height);
+                personCtx.globalCompositeOperation = 'source-over';
+                personCtx.drawImage(video, 0, 0, personCanvas.width, personCanvas.height);
+              }
+              
+              // Apply mask with detected format (only if detection completed)
+              if (maskFormatDetected) {
+                if (useDestinationOut) {
+                  // Inverted mask: white = background, so remove video where mask is opaque
+                  personCtx.globalCompositeOperation = 'destination-out';
+                } else {
+                  // Standard mask: white = person, so keep video where mask is opaque
+                  personCtx.globalCompositeOperation = 'destination-in';
+                }
+                personCtx.drawImage(mask, 0, 0, personCanvas.width, personCanvas.height);
+                
+                // Verify we got content - if not, try the alternative method
+                // This is a safety check in case detection was wrong
+                const verifyImageData = personCtx.getImageData(0, 0, personCanvas.width, personCanvas.height);
+                let hasContent = false;
+                // Quick check: sample every 100th pixel
+                for (let i = 3; i < verifyImageData.data.length && !hasContent; i += 400) {
+                  if (verifyImageData.data[i] > 50) {
+                    hasContent = true;
+                  }
+                }
+                
+                // If no content and we used destination-in, try destination-out instead
+                if (!hasContent && !useDestinationOut) {
+                  console.warn('⚠️ [DRAW FRAME] No content detected with destination-in, trying destination-out');
+                  personCtx.clearRect(0, 0, personCanvas.width, personCanvas.height);
+                  personCtx.globalCompositeOperation = 'source-over';
+                  personCtx.drawImage(video, 0, 0, personCanvas.width, personCanvas.height);
+                  personCtx.globalCompositeOperation = 'destination-out';
+                  personCtx.drawImage(mask, 0, 0, personCanvas.width, personCanvas.height);
+                  useDestinationOut = true; // Update flag for future frames
+                }
+              } else {
+                // Detection not complete yet - use standard format as fallback
+                personCtx.globalCompositeOperation = 'destination-in';
+                personCtx.drawImage(mask, 0, 0, personCanvas.width, personCanvas.height);
+              }
+              
+              // Now composite the person on top of background
+              // Background is already drawn on main canvas, so person goes on top
               ctx.globalCompositeOperation = 'source-over';
+              ctx.globalAlpha = 1.0;
               ctx.drawImage(personCanvas, 0, 0);
             } else {
               console.error('❌ Failed to create person canvas context');
@@ -853,12 +1384,22 @@ export default function VideoCall({ currentUser, activeChat, isGroup, incomingMo
               ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
             }
           } else {
-            // Results not ready yet, draw video for now (will update when results arrive)
+            // Results not ready yet - draw video with transparency/opacity so background shows through
+            // This provides visual feedback while waiting for MediaPipe
+            // Log occasionally to debug why segmentation isn't working
+            if (Math.random() < 0.01) { // Log ~1% of frames
+              console.log('⏳ [DRAW FRAME] Waiting for MediaPipe results, results:', !!results, 'hasMask:', results?.segmentationMask ? 'yes' : 'no', 'drawing video with fallback');
+            }
+            // Draw video with reduced opacity so background is partially visible
+            ctx.save();
+            ctx.globalAlpha = 0.7; // 70% opacity so background shows through
             ctx.globalCompositeOperation = 'source-over';
             ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+            ctx.restore();
           }
         } else {
-          // No segmentation available - draw video on top (fallback)
+          // No segmentation available - draw video on top of background (fallback)
+          // This ensures the video is always visible even if MediaPipe isn't working
           ctx.globalCompositeOperation = 'source-over';
           ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
         }
@@ -872,12 +1413,33 @@ export default function VideoCall({ currentUser, activeChat, isGroup, incomingMo
     };
 
     // Start drawing frames
+    console.log('🎬 [PROCESS VIDEO] Starting animation frame loop');
     drawFrame();
     canvasRef.current = canvas;
     videoElementRef.current = video;
+    
+    // Verify the drawing loop is actually running after a short delay
+    setTimeout(() => {
+      if (animationFrameRef.current) {
+        console.log('✅ [PROCESS VIDEO] Animation frame loop is running');
+      } else {
+        console.error('❌ [PROCESS VIDEO] Animation frame loop stopped unexpectedly!');
+      }
+    }, 500);
 
-    // Wait a bit to ensure video is playing and canvas is drawing
-    await new Promise(resolve => setTimeout(resolve, 200));
+    // Wait for video to be playing and ensure canvas has drawn at least one frame
+    // This is critical for the canvas stream to work properly
+    let waitCount = 0;
+    const maxWait = 50; // Maximum 2.5 seconds (50 * 50ms)
+    while ((!firstFrameDrawn || video.readyState < video.HAVE_CURRENT_DATA) && waitCount < maxWait) {
+      await new Promise(resolve => setTimeout(resolve, 50));
+      waitCount++;
+    }
+    
+    // Additional wait to ensure canvas stream is stable
+    await new Promise(resolve => setTimeout(resolve, 300));
+    
+    console.log('✅ Canvas ready for stream capture, video readyState:', video.readyState, 'firstFrameDrawn:', firstFrameDrawn, 'waited:', waitCount * 50, 'ms');
     
     // Store cleanup function to stop processing when needed
     const stopProcessing = () => {
@@ -901,13 +1463,41 @@ export default function VideoCall({ currentUser, activeChat, isGroup, incomingMo
     });
 
     // Ensure the canvas video track is enabled
-    processedStream.getVideoTracks().forEach(track => {
-      track.enabled = true;
-      console.log('🎥 Canvas video track:', { id: track.id, enabled: track.enabled, readyState: track.readyState, settings: track.getSettings() });
-    });
+    const canvasVideoTrack = processedStream.getVideoTracks()[0];
+    if (canvasVideoTrack) {
+      canvasVideoTrack.enabled = true;
+      console.log('🎥 [PROCESS VIDEO] Canvas video track:', { id: canvasVideoTrack.id, enabled: canvasVideoTrack.enabled, readyState: canvasVideoTrack.readyState, settings: canvasVideoTrack.getSettings() });
+      
+      // Wait for the canvas stream to actually start producing frames
+      // This is critical - the stream needs to be actively capturing before it can be used
+      console.log('⏳ [PROCESS VIDEO] Waiting for canvas stream to start producing frames...');
+      let frameCheckCount = 0;
+      const maxFrameChecks = 40; // Wait up to 2 seconds (40 * 50ms) for canvas to be ready
+      while (frameCheckCount < maxFrameChecks) {
+        const trackState = String(canvasVideoTrack.readyState);
+        if (trackState === 'live') {
+          console.log('✅ [PROCESS VIDEO] Canvas stream is live and producing frames');
+          break;
+        }
+        await new Promise(resolve => setTimeout(resolve, 50));
+        frameCheckCount++;
+      }
+      
+      const finalState = String(canvasVideoTrack.readyState);
+      if (finalState !== 'live') {
+        console.warn('⚠️ [PROCESS VIDEO] Canvas stream not live after waiting (readyState:', finalState, '), but continuing');
+      }
+      
+      // Additional wait to ensure frames are actually being captured and stream is stable
+      await new Promise(resolve => setTimeout(resolve, 500));
+      console.log('✅ [PROCESS VIDEO] Canvas stream should be ready now, final readyState:', String(canvasVideoTrack.readyState));
+    }
 
-    console.log('✅ Processed stream created with', processedStream.getVideoTracks().length, 'video tracks and', processedStream.getAudioTracks().length, 'audio tracks');
-    console.log('📊 Processed stream video track details:', processedStream.getVideoTracks().map(t => ({ id: t.id, kind: t.kind, enabled: t.enabled, readyState: t.readyState })));
+    console.log('✅ [PROCESS VIDEO] Processed stream created with', processedStream.getVideoTracks().length, 'video tracks and', processedStream.getAudioTracks().length, 'audio tracks');
+    console.log('📊 [PROCESS VIDEO] Processed stream video track details:', processedStream.getVideoTracks().map(t => ({ id: t.id, kind: t.kind, enabled: t.enabled, readyState: t.readyState })));
+    console.log('📊 [PROCESS VIDEO] Processed stream ID:', processedStream.id);
+    console.log('📊 [PROCESS VIDEO] Original stream ID:', stream.id);
+    console.log('📊 [PROCESS VIDEO] Streams are different objects:', processedStream !== stream);
     return processedStream;
   }, [userBackgrounds]);
 
@@ -1087,20 +1677,43 @@ export default function VideoCall({ currentUser, activeChat, isGroup, incomingMo
       localStream.current = stream;
       
       // Process stream with background if video call
+      // Read from localStorage directly to ensure we have the latest value
+      // ALWAYS read fresh from localStorage - never use cached state
+      const currentBackground = typeof window !== 'undefined' 
+        ? (localStorage.getItem('selectedBackground') || 'none')
+        : 'none';
+      
+      // Double-check: log both localStorage and state to debug any mismatches
+      const localStorageValue = typeof window !== 'undefined' ? localStorage.getItem('selectedBackground') : null;
+      console.log('🔍 [INITIATE CALL] Background check - type:', type, 'currentBackground:', currentBackground, 'from localStorage:', localStorageValue, 'from state:', selectedBackground);
+      
+      // Verify we're using the correct background
+      if (localStorageValue && localStorageValue !== currentBackground) {
+        console.warn('⚠️ [INITIATE CALL] Background mismatch detected! localStorage:', localStorageValue, 'currentBackground:', currentBackground);
+      }
+      
       let streamToUse = stream;
-      if (type === 'video' && selectedBackground !== 'none') {
+      if (type === 'video' && currentBackground !== 'none') {
         try {
-          console.log('🎨 Initiating background processing for video call, background:', selectedBackground);
-          streamToUse = await processVideoWithBackground(stream, selectedBackground);
+          console.log('🎨 [INITIATE CALL] Initiating background processing for video call, background:', currentBackground);
+          console.log('📊 [INITIATE CALL] Original stream has', stream.getVideoTracks().length, 'video tracks');
+          streamToUse = await processVideoWithBackground(stream, currentBackground);
           processedStreamRef.current = streamToUse;
-          console.log('✅ Background processing complete, processed stream has', streamToUse.getVideoTracks().length, 'video tracks');
+          console.log('✅ [INITIATE CALL] Background processing complete, processed stream has', streamToUse.getVideoTracks().length, 'video tracks');
+          console.log('📊 [INITIATE CALL] Processed stream track IDs:', streamToUse.getVideoTracks().map(t => t.id));
+          console.log('📊 [INITIATE CALL] Streams are different:', streamToUse !== stream);
         } catch (error) {
-          console.error('❌ Failed to process video with background, using original stream:', error);
+          console.error('❌ [INITIATE CALL] Failed to process video with background, using original stream:', error);
+          console.error('❌ [INITIATE CALL] Error details:', error instanceof Error ? error.message : String(error));
+          console.error('❌ [INITIATE CALL] Error stack:', error instanceof Error ? error.stack : 'No stack trace');
           streamToUse = stream; // Fallback to original stream
           processedStreamRef.current = null;
         }
       } else {
-        console.log('⏭️ No background processing needed (type:', type, ', background:', selectedBackground, ')');
+        console.log('⏭️ [INITIATE CALL] No background processing needed (type:', type, ', background:', currentBackground, ')');
+        if (type === 'video') {
+          console.warn('⚠️ [INITIATE CALL] Video call but background is "none" - background will not be applied!');
+        }
         processedStreamRef.current = null;
       }
       
@@ -1109,7 +1722,23 @@ export default function VideoCall({ currentUser, activeChat, isGroup, incomingMo
       streamToUse.getVideoTracks().forEach(track => track.enabled = !initialCameraOff);
       
       // Set local peer but keep state as 'calling' until receiver accepts
-      setPeers(new Map([[currentUser.id, { id: currentUser.id, stream: streamToUse, isLocal: true, user: currentUser }]]));
+      // Create new peer object with updateKey to force re-render on subsequent calls
+      const newUpdateKey = streamUpdateKey + 1;
+      setStreamUpdateKey(newUpdateKey);
+      const peerStream = streamToUse;
+      console.log('📊 [INITIATE CALL] Setting peer with stream that has', peerStream.getVideoTracks().length, 'video tracks');
+      console.log('📊 [INITIATE CALL] Peer stream track IDs:', peerStream.getVideoTracks().map(t => t.id));
+      console.log('📊 [INITIATE CALL] Peer stream ID:', peerStream.id);
+      console.log('📊 [INITIATE CALL] Original stream ID:', stream.id);
+      console.log('📊 [INITIATE CALL] Using processed stream:', peerStream !== stream);
+      setPeers(new Map([[currentUser.id, { 
+        id: currentUser.id, 
+        stream: peerStream, 
+        isLocal: true, 
+        user: currentUser,
+        updateKey: newUpdateKey // Force re-render with new stream
+      }]]));
+      console.log('✅ [INITIATE CALL] Peer set with stream, updateKey:', newUpdateKey, 'isProcessed:', peerStream !== stream);
       // DON'T set callState to 'active' yet - wait for receiver to accept
       // callState remains 'calling' until we receive a 'join' signal from the receiver
 
@@ -1229,20 +1858,49 @@ export default function VideoCall({ currentUser, activeChat, isGroup, incomingMo
           localStream.current = stream;
           
           // Process stream with background if video call
+          // Read from localStorage directly to ensure we have the latest value
+          // ALWAYS read fresh from localStorage - never use cached state
+          const currentBackground = typeof window !== 'undefined' 
+            ? (localStorage.getItem('selectedBackground') || 'none')
+            : 'none';
+          
+          // Double-check: log both localStorage and state to debug any mismatches
+          const localStorageValue = typeof window !== 'undefined' ? localStorage.getItem('selectedBackground') : null;
+          console.log('🔍 [AUTO-JOIN] Background check - incomingMode:', incomingMode, 'currentBackground:', currentBackground, 'from localStorage:', localStorageValue, 'from state:', selectedBackground);
+          
+          // Verify we're using the correct background
+          if (localStorageValue && localStorageValue !== currentBackground) {
+            console.warn('⚠️ [AUTO-JOIN] Background mismatch detected! localStorage:', localStorageValue, 'currentBackground:', currentBackground);
+          }
+          
           let streamToUse = stream;
-          if (incomingMode === 'video' && selectedBackground !== 'none') {
+          if (incomingMode === 'video' && currentBackground !== 'none') {
             try {
-              console.log('🎨 Auto-join: Initiating background processing, background:', selectedBackground);
-              streamToUse = await processVideoWithBackground(stream, selectedBackground);
+              console.log('🎨 [AUTO-JOIN] Initiating background processing, background:', currentBackground);
+              console.log('📊 [AUTO-JOIN] Original stream has', stream.getVideoTracks().length, 'video tracks');
+              streamToUse = await processVideoWithBackground(stream, currentBackground);
               processedStreamRef.current = streamToUse;
-              console.log('✅ Auto-join: Background processing complete');
+              console.log('✅ [AUTO-JOIN] Background processing complete');
+              console.log('📊 [AUTO-JOIN] Processed stream has', streamToUse.getVideoTracks().length, 'video tracks');
+              console.log('📊 [AUTO-JOIN] Processed stream track IDs:', streamToUse.getVideoTracks().map(t => t.id));
+              console.log('📊 [AUTO-JOIN] Streams are different:', streamToUse !== stream);
+              
+              // Wait a bit to ensure canvas stream is producing frames before using it
+              console.log('⏳ [AUTO-JOIN] Waiting for canvas stream to be ready...');
+              await new Promise(resolve => setTimeout(resolve, 500));
+              console.log('✅ [AUTO-JOIN] Canvas stream should be ready now');
             } catch (error) {
-              console.error('❌ Auto-join: Failed to process video with background, using original stream:', error);
+              console.error('❌ [AUTO-JOIN] Failed to process video with background, using original stream:', error);
+              console.error('❌ [AUTO-JOIN] Error details:', error instanceof Error ? error.message : String(error));
+              console.error('❌ [AUTO-JOIN] Error stack:', error instanceof Error ? error.stack : 'No stack trace');
               streamToUse = stream; // Fallback to original stream
               processedStreamRef.current = null;
             }
           } else {
-            console.log('⏭️ Auto-join: No background processing needed');
+            console.log('⏭️ [AUTO-JOIN] No background processing needed (incomingMode:', incomingMode, ', background:', currentBackground, ')');
+            if (incomingMode === 'video') {
+              console.warn('⚠️ [AUTO-JOIN] Video call but background is "none" - background will not be applied!');
+            }
             processedStreamRef.current = null;
           }
           
@@ -1251,7 +1909,23 @@ export default function VideoCall({ currentUser, activeChat, isGroup, incomingMo
           streamToUse.getVideoTracks().forEach(track => track.enabled = !initialCameraOff);
           
           // Set local peer but keep state as 'calling' until receiver accepts (for receiver, this is fine)
-          setPeers(new Map([[currentUser.id, { id: currentUser.id, stream: streamToUse, isLocal: true, user: currentUser }]]));
+          // Create new peer object with updateKey to force re-render on subsequent calls
+          const newUpdateKey = streamUpdateKey + 1;
+          setStreamUpdateKey(newUpdateKey);
+          const peerStream = streamToUse;
+          console.log('📊 [AUTO-JOIN] Setting peer with stream that has', peerStream.getVideoTracks().length, 'video tracks');
+          console.log('📊 [AUTO-JOIN] Peer stream track IDs:', peerStream.getVideoTracks().map(t => t.id));
+          console.log('📊 [AUTO-JOIN] Peer stream ID:', peerStream.id);
+          console.log('📊 [AUTO-JOIN] Original stream ID:', stream.id);
+          console.log('📊 [AUTO-JOIN] Using processed stream:', peerStream !== stream);
+          setPeers(new Map([[currentUser.id, { 
+            id: currentUser.id, 
+            stream: peerStream, 
+            isLocal: true, 
+            user: currentUser,
+            updateKey: newUpdateKey // Force re-render with new stream
+          }]]));
+          console.log('✅ [AUTO-JOIN] Peer set with stream, updateKey:', newUpdateKey, 'isProcessed:', peerStream !== stream);
           // For receiver (auto-join), set to active immediately since they're accepting
           setCallState('active');
           callStateRef.current = 'active';
@@ -1404,20 +2078,44 @@ export default function VideoCall({ currentUser, activeChat, isGroup, incomingMo
       localStream.current = stream;
       
       // Process stream with background if video call
+      // Read from localStorage directly to ensure we have the latest value
+      // ALWAYS read fresh from localStorage - never use cached state
+      const currentBackground = typeof window !== 'undefined' 
+        ? (localStorage.getItem('selectedBackground') || 'none')
+        : 'none';
+      
+      // Double-check: log both localStorage and state to debug any mismatches
+      const localStorageValue = typeof window !== 'undefined' ? localStorage.getItem('selectedBackground') : null;
+      console.log('🔍 [JOIN CALL] Background check - callType:', callType, 'currentBackground:', currentBackground, 'from localStorage:', localStorageValue, 'from state:', selectedBackground);
+      
+      // Verify we're using the correct background
+      if (localStorageValue && localStorageValue !== currentBackground) {
+        console.warn('⚠️ [JOIN CALL] Background mismatch detected! localStorage:', localStorageValue, 'currentBackground:', currentBackground);
+      }
+      
       let streamToUse = stream;
-      if (callType === 'video' && selectedBackground !== 'none') {
+      if (callType === 'video' && currentBackground !== 'none') {
         try {
-          console.log('🎨 Join call: Initiating background processing, background:', selectedBackground);
-          streamToUse = await processVideoWithBackground(stream, selectedBackground);
+          console.log('🎨 [JOIN CALL] Initiating background processing, background:', currentBackground);
+          console.log('📊 [JOIN CALL] Original stream has', stream.getVideoTracks().length, 'video tracks');
+          streamToUse = await processVideoWithBackground(stream, currentBackground);
           processedStreamRef.current = streamToUse;
-          console.log('✅ Join call: Background processing complete');
+          console.log('✅ [JOIN CALL] Background processing complete');
+          console.log('📊 [JOIN CALL] Processed stream has', streamToUse.getVideoTracks().length, 'video tracks');
+          console.log('📊 [JOIN CALL] Processed stream track IDs:', streamToUse.getVideoTracks().map(t => t.id));
+          console.log('📊 [JOIN CALL] Streams are different:', streamToUse !== stream);
         } catch (error) {
-          console.error('❌ Join call: Failed to process video with background, using original stream:', error);
+          console.error('❌ [JOIN CALL] Failed to process video with background, using original stream:', error);
+          console.error('❌ [JOIN CALL] Error details:', error instanceof Error ? error.message : String(error));
+          console.error('❌ [JOIN CALL] Error stack:', error instanceof Error ? error.stack : 'No stack trace');
           streamToUse = stream; // Fallback to original stream
           processedStreamRef.current = null;
         }
       } else {
-        console.log('⏭️ Join call: No background processing needed');
+        console.log('⏭️ [JOIN CALL] No background processing needed (callType:', callType, ', background:', currentBackground, ')');
+        if (callType === 'video') {
+          console.warn('⚠️ [JOIN CALL] Video call but background is "none" - background will not be applied!');
+        }
         processedStreamRef.current = null;
       }
       
@@ -1425,7 +2123,23 @@ export default function VideoCall({ currentUser, activeChat, isGroup, incomingMo
       setIsCameraOff(initialCameraOff);
       streamToUse.getVideoTracks().forEach(track => track.enabled = !initialCameraOff);
       
-      setPeers(new Map([[currentUser.id, { id: currentUser.id, stream: streamToUse, isLocal: true, user: currentUser }]]));
+      // Create new peer object with updateKey to force re-render on subsequent calls
+      const newUpdateKey = streamUpdateKey + 1;
+      setStreamUpdateKey(newUpdateKey);
+      const peerStream = streamToUse;
+      console.log('📊 [JOIN CALL] Setting peer with stream that has', peerStream.getVideoTracks().length, 'video tracks');
+      console.log('📊 [JOIN CALL] Peer stream track IDs:', peerStream.getVideoTracks().map(t => t.id));
+      console.log('📊 [JOIN CALL] Peer stream ID:', peerStream.id);
+      console.log('📊 [JOIN CALL] Original stream ID:', stream.id);
+      console.log('📊 [JOIN CALL] Using processed stream:', peerStream !== stream);
+      setPeers(new Map([[currentUser.id, { 
+        id: currentUser.id, 
+        stream: peerStream, 
+        isLocal: true, 
+        user: currentUser,
+        updateKey: newUpdateKey // Force re-render with new stream
+      }]]));
+      console.log('✅ [JOIN CALL] Peer set with stream, updateKey:', newUpdateKey, 'isProcessed:', peerStream !== stream);
       setCallState('active');
       callStateRef.current = 'active';
 
@@ -2174,8 +2888,75 @@ export default function VideoCall({ currentUser, activeChat, isGroup, incomingMo
   // Handle background change
   const handleBackgroundChange = async (backgroundId: string) => {
     console.log('🎨 [BACKGROUND CHANGE] Changing background to:', backgroundId);
-    setSelectedBackground(backgroundId);
+    // Don't update state here - it's managed by localStorage
+    
     if (callType === 'video' && localStream.current && (callState === 'active' || callState === 'calling')) {
+      // Get latest backgrounds from localStorage
+      let latestUserBackgrounds: Array<{ id: string; name: string; url: string }> = [];
+      try {
+        const saved = localStorage.getItem('userBackgrounds');
+        if (saved) {
+          latestUserBackgrounds = JSON.parse(saved);
+        }
+      } catch (e) {
+        console.warn('Failed to load user backgrounds from localStorage:', e);
+      }
+      
+      // Preload background image if it's an image background (not 'none' or 'blur')
+      if (backgroundId !== 'none' && backgroundId !== 'blur') {
+        const allBackgrounds = [...BACKGROUND_OPTIONS, ...latestUserBackgrounds];
+        const backgroundOption = allBackgrounds.find(bg => bg.id === backgroundId);
+        
+        console.log('🔍 [BACKGROUND CHANGE] Background lookup:', {
+          backgroundId,
+          found: !!backgroundOption,
+          hasUrl: !!backgroundOption?.url,
+          totalBackgrounds: allBackgrounds.length
+        });
+        
+        if (backgroundOption?.url) {
+          console.log('🖼️ [BACKGROUND CHANGE] Preloading background image:', backgroundOption.url);
+          try {
+            const img = new Image();
+            img.crossOrigin = 'anonymous';
+            const imageLoaded = await new Promise<boolean>((resolve) => {
+              const timeout = setTimeout(() => {
+                console.warn('⏱️ [BACKGROUND CHANGE] Background image preload timeout');
+                resolve(false);
+              }, 5000); // Increased timeout to 5 seconds
+              
+              img.onload = () => {
+                clearTimeout(timeout);
+                if (img.naturalWidth > 0 && img.naturalHeight > 0) {
+                  console.log('✅ [BACKGROUND CHANGE] Background image preloaded successfully, dimensions:', img.naturalWidth, 'x', img.naturalHeight);
+                  backgroundImageRef.current = img;
+                  resolve(true);
+                } else {
+                  console.warn('⚠️ [BACKGROUND CHANGE] Background image loaded but has invalid dimensions');
+                  resolve(false);
+                }
+              };
+              
+              img.onerror = () => {
+                clearTimeout(timeout);
+                console.warn('⚠️ [BACKGROUND CHANGE] Failed to preload background image');
+                resolve(false);
+              };
+              
+              img.src = backgroundOption.url;
+            });
+            
+            if (!imageLoaded) {
+              console.warn('⚠️ [BACKGROUND CHANGE] Background image preload failed, will retry during processing');
+            }
+          } catch (e) {
+            console.warn('⚠️ [BACKGROUND CHANGE] Error preloading background:', e);
+          }
+        } else {
+          console.warn('⚠️ [BACKGROUND CHANGE] Background option not found or has no URL:', backgroundId);
+        }
+      }
+      
       // Stop old processed stream
       if (processedStreamRef.current) {
         console.log('🛑 [BACKGROUND CHANGE] Stopping old processed stream tracks');
@@ -2208,7 +2989,7 @@ export default function VideoCall({ currentUser, activeChat, isGroup, incomingMo
       }
       
       // Wait a bit to ensure old stream is fully stopped before creating new one
-      await new Promise(resolve => setTimeout(resolve, 100));
+      await new Promise(resolve => setTimeout(resolve, 50));
 
       // Process with new background
       if (backgroundId !== 'none') {
@@ -2218,14 +2999,52 @@ export default function VideoCall({ currentUser, activeChat, isGroup, incomingMo
           processedStreamRef.current = newProcessedStream;
           console.log('✅ [BACKGROUND CHANGE] New processed stream created with', newProcessedStream.getVideoTracks().length, 'video tracks');
         
-          // Update local peer
+          // Update local peer - force update by creating completely new Map and peer object
           setPeers(prev => {
-            const newPeers = new Map(prev);
-            const localPeer = newPeers.get(currentUser.id);
-            if (localPeer) {
-              newPeers.set(currentUser.id, { ...localPeer, stream: newProcessedStream });
-            }
+            const newPeers = new Map();
+            // Copy all existing peers except local
+            prev.forEach((peer, id) => {
+              if (id !== currentUser.id) {
+                newPeers.set(id, peer);
+              }
+            });
+            // Create completely new local peer object with new stream
+            const newUpdateKey = streamUpdateKey + 1;
+            setStreamUpdateKey(newUpdateKey);
+            newPeers.set(currentUser.id, {
+              id: currentUser.id,
+              stream: newProcessedStream,
+              isLocal: true,
+              user: currentUser,
+              updateKey: newUpdateKey // Add update key to force re-render
+            });
+            console.log('🔄 [BACKGROUND CHANGE] Updated peers map with new stream, track ID:', newProcessedStream.getVideoTracks()[0]?.id, 'updateKey:', newUpdateKey);
             return newPeers;
+          });
+
+          // Force multiple updates to ensure video element refreshes
+          const forceUpdates = [50, 100, 200];
+          forceUpdates.forEach(delay => {
+            setTimeout(() => {
+              setPeers(prev => {
+                const newPeers = new Map(prev);
+                const localPeer = newPeers.get(currentUser.id);
+                if (localPeer && processedStreamRef.current) {
+                  // Create new peer object to force React update
+                  const currentUpdateKey = streamUpdateKey;
+                  setStreamUpdateKey(currentUpdateKey + 1);
+                  newPeers.set(currentUser.id, {
+                    id: currentUser.id,
+                    stream: processedStreamRef.current,
+                    isLocal: true,
+                    user: currentUser,
+                    updateKey: currentUpdateKey + 1
+                  });
+                  console.log(`🔄 [BACKGROUND CHANGE] Force update at ${delay}ms, track ID:`, processedStreamRef.current.getVideoTracks()[0]?.id);
+                }
+                return newPeers;
+              });
+            }, delay);
           });
 
           // Update all peer connections
@@ -2281,102 +3100,8 @@ export default function VideoCall({ currentUser, activeChat, isGroup, incomingMo
   // --- RENDER LOGIC ---
   if (callState === 'idle') {
     return (
-      <div className="border-b border-gray-800 p-3 bg-gray-900 shrink-0" style={{ position: 'relative', zIndex: 1, minHeight: '80px' }}>
+      <div className="border-b border-slate-700 p-3 bg-slate-800 shrink-0" style={{ position: 'relative', zIndex: 1, minHeight: '80px' }}>
         <div className="flex flex-col gap-3">
-          {/* Background Selection (only show for video calls when active) */}
-          {callType === 'video' && (callState === 'active' || callState === 'calling') && (
-            <div className="flex items-center justify-between">
-              <span className="text-gray-300 text-sm">Video Background:</span>
-              <div className="relative" ref={backgroundSelectorRef}>
-                <button 
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    setShowBackgroundSelector(!showBackgroundSelector);
-                  }}
-                  className={`px-3 py-1.5 rounded-lg text-sm text-white border-2 transition-colors ${
-                    selectedBackground !== 'none' 
-                      ? 'border-blue-500 bg-blue-600 hover:bg-blue-500' 
-                      : 'border-gray-600 bg-gray-700 hover:bg-gray-600'
-                  }`}
-                >
-                  {getBackgroundById(selectedBackground)?.name || 'None'}
-                  <span className="ml-2">▼</span>
-                </button>
-                {showBackgroundSelector && (
-                  <>
-                    {/* Backdrop for mobile */}
-                    <div 
-                      className="fixed inset-0 bg-black bg-opacity-50 z-[99999] sm:hidden"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        setShowBackgroundSelector(false);
-                      }}
-                      style={{ zIndex: 99999 }}
-                    />
-                    <div 
-                      className="fixed sm:absolute sm:top-full sm:right-0 top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 sm:translate-x-0 sm:translate-y-0 mt-0 sm:mt-2 bg-gray-800 border border-gray-700 rounded-lg p-4 shadow-2xl z-[100000] w-[90vw] max-w-[400px] max-h-[80vh] overflow-y-auto"
-                      onClick={(e) => e.stopPropagation()}
-                      style={{ zIndex: 100000 }}
-                    >
-                    <div className="text-white text-sm font-bold mb-3">
-                      <span>Select Background</span>
-                      <p className="text-xs text-gray-400 font-normal mt-1">Manage backgrounds in Settings</p>
-                    </div>
-                    
-                    {/* Preview Section */}
-                    {previewBackground && (
-                      <div className="mb-3 p-2 bg-gray-900 rounded border border-gray-600">
-                        <div className="text-xs text-gray-400 mb-2">Preview:</div>
-                        <div className="relative aspect-video bg-gray-700 rounded overflow-hidden">
-                          {previewBackground === 'blur' ? (
-                            <div className="w-full h-full flex items-center justify-center text-gray-400 text-xs">
-                              Blur Effect
-                            </div>
-                          ) : previewBackground === 'none' ? (
-                            <div className="w-full h-full flex items-center justify-center text-gray-400 text-xs">
-                              No Background
-                            </div>
-                          ) : (
-                            <img 
-                              src={getBackgroundById(previewBackground)?.url || ''} 
-                              alt="Preview" 
-                              className="w-full h-full object-cover"
-                            />
-                          )}
-                        </div>
-                      </div>
-                    )}
-                    
-                    <div className="grid grid-cols-2 gap-2">
-                      {getAllBackgrounds().map(bg => (
-                        <button
-                          key={bg.id}
-                          onClick={async (e) => {
-                            e.stopPropagation();
-                            await handleBackgroundChange(bg.id);
-                            setPreviewBackground(bg.id);
-                            if (bg.id === 'none') {
-                              setShowBackgroundSelector(false);
-                            }
-                          }}
-                          onMouseEnter={() => setPreviewBackground(bg.id)}
-                          className={`w-full p-2 rounded-lg text-xs font-medium text-white border-2 transition-colors ${
-                            selectedBackground === bg.id 
-                              ? 'border-blue-500 bg-blue-600' 
-                              : 'border-gray-600 bg-gray-700 hover:bg-gray-600'
-                          }`}
-                        >
-                          {bg.name}
-                        </button>
-                      ))}
-                    </div>
-                    </div>
-                  </>
-                )}
-              </div>
-            </div>
-          )}
-          
           {/* Call Buttons */}
           <div className="flex gap-2 justify-end">
             <button 
@@ -2475,9 +3200,9 @@ export default function VideoCall({ currentUser, activeChat, isGroup, incomingMo
 
 
   return (
-    <div className="border-b border-gray-800 p-3 bg-gray-900 relative shrink-0" style={{ position: 'relative', zIndex: 1, minHeight: '80px', maxHeight: '500px', overflowY: 'auto' }}>
+    <div className="border-b border-slate-700 p-3 bg-slate-800 relative shrink-0" style={{ position: 'relative', zIndex: 1, minHeight: '80px', maxHeight: '500px', overflowY: 'auto' }}>
         <div className="space-y-4">
-          <div className="flex justify-between items-center bg-gray-800 p-2 rounded-lg border border-gray-700 shadow-lg relative">
+          <div className="flex justify-between items-center bg-slate-700 p-2 rounded-lg border border-slate-600 shadow-lg relative">
             <span className="text-green-400 text-sm font-bold flex items-center gap-2 px-2">
               <span className="relative flex h-3 w-3"><span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-green-400 opacity-75"></span><span className="relative inline-flex rounded-full h-3 w-3 bg-green-500"></span></span>
               {callState === 'calling' ? 'Connecting...' : 'Live'}
@@ -2485,98 +3210,13 @@ export default function VideoCall({ currentUser, activeChat, isGroup, incomingMo
             <div className="flex items-center gap-2 relative">
               <button onClick={toggleMic} className={`p-2 rounded-full text-white ${isMicMuted ? 'bg-red-500' : 'bg-gray-600 hover:bg-gray-500'}`}>{isMicMuted ? <MicOff size={20} /> : <Mic size={20} />}</button>
               {callType === 'video' && <button onClick={toggleCamera} className={`p-2 rounded-full text-white ${isCameraOff ? 'bg-red-500' : 'bg-gray-600 hover:bg-gray-500'}`}>{isCameraOff ? <VideoOff size={20} /> : <VideoIcon size={20} />}</button>}
-              {callType === 'video' && (
-                <div className="relative z-50" ref={backgroundSelectorRef}>
-                  <button 
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      setShowBackgroundSelector(!showBackgroundSelector);
-                    }}
-                    className={`p-2 rounded-full text-white ${selectedBackground !== 'none' ? 'bg-blue-500' : 'bg-gray-600 hover:bg-gray-500'}`}
-                    title="Change Background"
-                  >
-                    <ImageIcon size={20} />
-                  </button>
-                  {showBackgroundSelector && (
-                    <>
-                      {/* Backdrop for mobile */}
-                      <div 
-                        className="fixed inset-0 bg-black bg-opacity-50 z-[99999] sm:hidden"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          setShowBackgroundSelector(false);
-                        }}
-                        style={{ zIndex: 99999 }}
-                      />
-                      <div 
-                        className="fixed sm:absolute sm:top-full sm:right-0 top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 sm:translate-x-0 sm:translate-y-0 mt-0 sm:mt-2 bg-gray-800 border border-gray-700 rounded-lg p-3 shadow-2xl z-[100000] w-[90vw] max-w-[400px] max-h-[80vh] overflow-y-auto"
-                        onClick={(e) => e.stopPropagation()}
-                        style={{ zIndex: 100000 }}
-                      >
-                      <div className="text-white text-sm font-bold mb-3">
-                        <span>Select Background</span>
-                        <p className="text-xs text-gray-400 font-normal mt-1">Manage backgrounds in Settings</p>
-                      </div>
-                      
-                      {/* Preview Section */}
-                      {previewBackground && (
-                        <div className="mb-3 p-2 bg-gray-900 rounded border border-gray-600">
-                          <div className="text-xs text-gray-400 mb-2">Preview:</div>
-                          <div className="relative aspect-video bg-gray-700 rounded overflow-hidden">
-                            {previewBackground === 'blur' ? (
-                              <div className="w-full h-full flex items-center justify-center text-gray-400 text-xs">
-                                Blur Effect
-                              </div>
-                            ) : previewBackground === 'none' ? (
-                              <div className="w-full h-full flex items-center justify-center text-gray-400 text-xs">
-                                No Background
-                              </div>
-                            ) : (
-                              <img 
-                                src={getBackgroundById(previewBackground)?.url || ''} 
-                                alt="Preview" 
-                                className="w-full h-full object-cover"
-                              />
-                            )}
-                          </div>
-                        </div>
-                      )}
-                      
-                      <div className="grid grid-cols-2 gap-2">
-                        {getAllBackgrounds().map(bg => (
-                          <button
-                            key={bg.id}
-                            onClick={async (e) => {
-                              e.stopPropagation();
-                              await handleBackgroundChange(bg.id);
-                              setPreviewBackground(bg.id);
-                              if (bg.id === 'none') {
-                                setShowBackgroundSelector(false);
-                              }
-                            }}
-                            onMouseEnter={() => setPreviewBackground(bg.id)}
-                            className={`w-full p-2 rounded-lg text-xs font-medium text-white border-2 transition-colors ${
-                              selectedBackground === bg.id 
-                                ? 'border-blue-500 bg-blue-600' 
-                                : 'border-gray-600 bg-gray-700 hover:bg-gray-600'
-                            }`}
-                          >
-                            {bg.name}
-                          </button>
-                        ))}
-                      </div>
-                    </div>
-                  </>
-                  )}
-                </div>
-              )}
             </div>
             <button onClick={handleEndCallClick} className="bg-red-600 hover:bg-red-500 px-4 py-2 rounded-full text-white flex items-center gap-2 text-sm font-bold"><PhoneOff size={16} /> End</button>
           </div>
 
           <div className={`grid gap-3 ${peers.size > 1 ? 'grid-cols-2' : 'grid-cols-1'}`}>
             {Array.from(peers.values()).map(p => <VideoPlayer key={p.id} peer={p} />)}
-            {peers.size === 1 && !isGroup && callState === 'active' && <div className="flex items-center justify-center aspect-video bg-gray-800 rounded-lg border border-gray-700 text-gray-400 text-xs">Waiting for other user...</div>}
+            {peers.size === 1 && !isGroup && callState === 'active' && <div className="flex items-center justify-center aspect-video bg-slate-700 rounded-lg border border-slate-600 text-slate-300 text-xs">Waiting for other user...</div>}
           </div>
         </div>
     </div>

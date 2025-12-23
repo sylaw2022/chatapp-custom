@@ -24,3 +24,40 @@ body {
   color: var(--foreground);
   font-family: Arial, Helvetica, sans-serif;
 }
+
+/* Hide Next.js development indicator */
+[data-nextjs-toast],
+[data-nextjs-toast] *,
+.__next-dev-overlay,
+#__next-build-watcher,
+[data-nextjs-dialog],
+[data-nextjs-dialog-overlay],
+iframe[src*="__next"],
+iframe[src*="next"],
+div[data-nextjs-dialog],
+div[data-nextjs-dialog-overlay],
+div[id*="__next"],
+div[class*="__next"],
+div[class*="nextjs"],
+div[id*="nextjs"],
+/* Target bottom-left positioned elements */
+body > div[style*="position: fixed"][style*="bottom"],
+body > div[style*="position: fixed"][style*="left"],
+body > div[style*="bottom: 0"],
+body > div[style*="left: 0"],
+div[style*="bottom: 0"][style*="left: 0"],
+div[style*="bottom: 0"][style*="left: 0"] *,
+/* Target any element in bottom-left corner */
+body > *:last-child[style*="position: fixed"],
+body > *:last-child[style*="bottom"] {
+  display: none !important;
+  visibility: hidden !important;
+  opacity: 0 !important;
+  pointer-events: none !important;
+  height: 0 !important;
+  width: 0 !important;
+  overflow: hidden !important;
+  position: absolute !important;
+  left: -9999px !important;
+  bottom: -9999px !important;
+}

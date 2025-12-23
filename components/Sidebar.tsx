@@ -43,7 +43,28 @@ export default function Sidebar({ currentUser, onSelect, onUpdateUser, onLogout 
   
   // Background Management States
   const [userBackgrounds, setUserBackgrounds] = useState<Array<{ id: string; name: string; url: string }>>([])
+  const [selectedBackground, setSelectedBackground] = useState<string>('none')
   const backgroundFileInputRef = useRef<HTMLInputElement>(null)
+  
+  // Predefined background options (same as VideoCall)
+  const BACKGROUND_OPTIONS = [
+    { id: 'none', name: 'None', url: null },
+    { id: 'blur', name: 'Blur', url: 'blur' },
+    { id: 'office', name: 'Office', url: 'https://images.unsplash.com/photo-1497366216548-37526070297c?w=1920&h=1080&fit=crop' },
+    { id: 'beach', name: 'Beach', url: 'https://images.unsplash.com/photo-1507525428034-b723cf961d3e?w=1920&h=1080&fit=crop' },
+    { id: 'space', name: 'Space', url: 'https://images.unsplash.com/photo-1446776653964-20c1d3a81b06?w=1920&h=1080&fit=crop' },
+    { id: 'nature', name: 'Nature', url: 'https://images.unsplash.com/photo-1441974231531-c6227db76b6e?w=1920&h=1080&fit=crop' },
+  ]
+  
+  // Get all available backgrounds
+  const getAllBackgrounds = () => {
+    return [...BACKGROUND_OPTIONS, ...userBackgrounds]
+  }
+  
+  // Get background by ID
+  const getBackgroundById = (id: string) => {
+    return getAllBackgrounds().find(bg => bg.id === id)
+  }
 
   const supabase = createClient()
 
@@ -320,7 +341,7 @@ export default function Sidebar({ currentUser, onSelect, onUpdateUser, onLogout 
     }
   }, [currentUser])
 
-  // Load user backgrounds from localStorage on mount
+  // Load user backgrounds and selected background from localStorage on mount
   useEffect(() => {
     const saved = localStorage.getItem('userBackgrounds');
     if (saved) {
@@ -329,6 +350,11 @@ export default function Sidebar({ currentUser, onSelect, onUpdateUser, onLogout 
       } catch (e) {
         console.error('Failed to load user backgrounds:', e);
       }
+    }
+    
+    const savedSelected = localStorage.getItem('selectedBackground');
+    if (savedSelected) {
+      setSelectedBackground(savedSelected);
     }
   }, []);
   
@@ -340,6 +366,16 @@ export default function Sidebar({ currentUser, onSelect, onUpdateUser, onLogout 
       localStorage.removeItem('userBackgrounds');
     }
   }, [userBackgrounds]);
+  
+  // Save selected background to localStorage
+  useEffect(() => {
+    localStorage.setItem('selectedBackground', selectedBackground);
+  }, [selectedBackground]);
+  
+  // Handle background selection
+  const handleBackgroundSelect = (backgroundId: string) => {
+    setSelectedBackground(backgroundId);
+  };
 
   // --- Initialize Profile Modal Data ---
   useEffect(() => {
@@ -491,9 +527,9 @@ export default function Sidebar({ currentUser, onSelect, onUpdateUser, onLogout 
   };
 
   return (
-    <div className="w-full md:w-80 bg-gray-900 border-r border-gray-800 flex flex-col h-full">
+    <div className="w-full md:w-80 bg-slate-800 border-r border-slate-700 flex flex-col h-full">
       {/* Current User Header */}
-      <div className="p-4 bg-gray-950 border-b border-gray-800 flex items-center justify-between">
+      <div className="p-4 bg-slate-900 border-b border-slate-700 flex items-center justify-between">
         <div className="flex items-center gap-3">
           <img src={currentUser.avatar} className="w-12 h-12 rounded-full border-2 border-green-500 object-cover" />
           <div>
@@ -506,7 +542,7 @@ export default function Sidebar({ currentUser, onSelect, onUpdateUser, onLogout 
           {/* Settings Button */}
           <button 
             onClick={() => setShowProfileModal(true)}
-            className="p-2 text-gray-400 hover:text-white hover:bg-gray-800 rounded-full transition-colors"
+            className="p-2 text-slate-300 hover:text-white hover:bg-slate-700 rounded-full transition-colors"
             title="Edit Profile"
           >
             <Settings size={20} />
@@ -515,7 +551,7 @@ export default function Sidebar({ currentUser, onSelect, onUpdateUser, onLogout 
           {/* Logout Button */}
           <button 
             onClick={onLogout}
-            className="p-2 text-gray-400 hover:text-red-400 hover:bg-gray-800 rounded-full transition-colors"
+            className="p-2 text-slate-300 hover:text-red-400 hover:bg-slate-700 rounded-full transition-colors"
             title="Logout"
           >
             <LogOut size={20} />
@@ -524,17 +560,17 @@ export default function Sidebar({ currentUser, onSelect, onUpdateUser, onLogout 
       </div>
 
       {/* Tabs */}
-      <div className="flex p-2 gap-2 bg-gray-900 border-b border-gray-800">
-        <button onClick={() => setView('friends')} className={`flex-1 p-2 rounded text-sm flex items-center justify-center gap-2 ${view === 'friends' ? 'bg-blue-600 text-white' : 'bg-gray-800 text-gray-400 hover:bg-gray-700'}`}>
+      <div className="flex p-2 gap-2 bg-slate-800 border-b border-slate-700">
+        <button onClick={() => setView('friends')} className={`flex-1 p-2 rounded text-sm flex items-center justify-center gap-2 ${view === 'friends' ? 'bg-blue-600 text-white' : 'bg-slate-700 text-slate-200 hover:bg-slate-600'}`}>
           <Users size={16} /> Friends
         </button>
-        <button onClick={() => setView('groups')} className={`flex-1 p-2 rounded text-sm flex items-center justify-center gap-2 ${view === 'groups' ? 'bg-blue-600 text-white' : 'bg-gray-800 text-gray-400 hover:bg-gray-700'}`}>
+        <button onClick={() => setView('groups')} className={`flex-1 p-2 rounded text-sm flex items-center justify-center gap-2 ${view === 'groups' ? 'bg-blue-600 text-white' : 'bg-slate-700 text-slate-200 hover:bg-slate-600'}`}>
           <MessageSquare size={16} /> Groups
         </button>
         <button 
           onClick={() => fetchData()} 
           disabled={isRefreshing}
-          className="p-2 rounded bg-gray-800 text-gray-400 hover:bg-gray-700 hover:text-white transition-colors disabled:opacity-50"
+          className="p-2 rounded bg-slate-700 text-slate-200 hover:bg-slate-600 hover:text-white transition-colors disabled:opacity-50"
           title="Refresh"
         >
           <RefreshCw size={16} className={isRefreshing ? 'animate-spin' : ''} />
@@ -545,11 +581,11 @@ export default function Sidebar({ currentUser, onSelect, onUpdateUser, onLogout 
       <div className="flex-1 overflow-y-auto p-2 space-y-1">
         {view === 'friends' ? (
           <>
-             <button onClick={openUserSearch} className="w-full mb-3 bg-gray-800 hover:bg-gray-700 border border-gray-700 text-gray-300 p-2 rounded flex items-center justify-center gap-2 transition-colors">
+             <button onClick={openUserSearch} className="w-full mb-3 bg-slate-700 hover:bg-slate-600 border border-slate-600 text-slate-100 p-2 rounded flex items-center justify-center gap-2 transition-colors">
                 <Search size={16} /> Find New Friends
              </button>
              {friends.length === 0 ? (
-               <div className="text-center py-8 text-gray-500 text-sm">
+               <div className="text-center py-8 text-slate-400 text-sm">
                  <p>No friends yet. Click "Find New Friends" to add some!</p>
                </div>
              ) : (
@@ -578,11 +614,11 @@ export default function Sidebar({ currentUser, onSelect, onUpdateUser, onLogout 
                  const isLatestFromMe = latestMsg && latestMsg.sender_id === currentUser.id
                  
                  return (
-                   <div key={f.id} onClick={() => onSelect(f, false)} className="p-3 hover:bg-gray-800 rounded-lg cursor-pointer flex items-center gap-3 transition-colors">
-                     <img src={f.avatar} className="w-10 h-10 rounded-full bg-gray-700 object-cover flex-shrink-0" />
+                   <div key={f.id} onClick={() => onSelect(f, false)} className="p-3 hover:bg-slate-700 rounded-lg cursor-pointer flex items-center gap-3 transition-colors">
+                     <img src={f.avatar} className="w-10 h-10 rounded-full bg-slate-600 object-cover flex-shrink-0" />
                      <div className="flex-1 min-w-0 overflow-hidden">
                        <div className="flex items-center justify-between gap-2 mb-0.5">
-                         <p className="text-gray-200 font-medium truncate">{f.nickname || f.username}</p>
+                         <p className="text-slate-100 font-medium truncate">{f.nickname || f.username}</p>
                          {latestMsg && (
                            <div className="flex-shrink-0 ml-1 flex items-center" title={isLatestFromMe ? (latestMsg.is_read ? 'Read' : 'Sent') : (latestMsg.is_read ? 'You read it' : 'Unread')}>
                              {isLatestFromMe ? (
@@ -620,9 +656,9 @@ export default function Sidebar({ currentUser, onSelect, onUpdateUser, onLogout 
                          )}
                        </div>
                        {preview ? (
-                         <p className="text-xs text-gray-400 truncate block" title={preview}>{preview}</p>
+                         <p className="text-xs text-slate-300 truncate block" title={preview}>{preview}</p>
                        ) : (
-                         <p className="text-xs text-gray-500 truncate block">@{f.username}</p>
+                         <p className="text-xs text-slate-400 truncate block">@{f.username}</p>
                        )}
                      </div>
                    </div>
@@ -632,7 +668,7 @@ export default function Sidebar({ currentUser, onSelect, onUpdateUser, onLogout 
           </>
         ) : (
           <>
-            <button onClick={() => setShowGroupModal(true)} className="w-full mb-3 bg-gray-800 hover:bg-gray-700 border border-gray-700 text-gray-300 p-2 rounded flex items-center justify-center gap-2 transition-colors">
+            <button onClick={() => setShowGroupModal(true)} className="w-full mb-3 bg-slate-700 hover:bg-slate-600 border border-slate-600 text-slate-100 p-2 rounded flex items-center justify-center gap-2 transition-colors">
               <Plus size={16} /> Create Group
             </button>
             {groups.map(g => {
@@ -646,12 +682,12 @@ export default function Sidebar({ currentUser, onSelect, onUpdateUser, onLogout 
               const preview = getMessagePreview()
               
               return (
-                <div key={g.id} onClick={() => onSelect(g, true)} className="group p-3 hover:bg-gray-800 rounded-lg cursor-pointer flex items-center justify-between transition-colors">
+                <div key={g.id} onClick={() => onSelect(g, true)} className="group p-3 hover:bg-slate-700 rounded-lg cursor-pointer flex items-center justify-between transition-colors">
                   <div className="flex items-center gap-3 flex-1 min-w-0">
                     <div className="w-10 h-10 rounded-full bg-indigo-600 flex items-center justify-center text-white font-bold text-lg flex-shrink-0">{g.name[0].toUpperCase()}</div>
                     <div className="flex-1 min-w-0">
                       <div className="flex items-center justify-between gap-2">
-                        <span className="text-gray-200 font-medium truncate">{g.name}</span>
+                        <span className="text-slate-100 font-medium truncate">{g.name}</span>
                         {latestMsg && (
                           <div className="flex-shrink-0 flex items-center">
                             {latestMsg.sender_id === currentUser.id ? (
@@ -689,12 +725,12 @@ export default function Sidebar({ currentUser, onSelect, onUpdateUser, onLogout 
                         )}
                       </div>
                       {preview && (
-                        <p className="text-xs text-gray-400 truncate mt-0.5">{preview}</p>
+                        <p className="text-xs text-slate-300 truncate mt-0.5">{preview}</p>
                       )}
                     </div>
                   </div>
                   {g.admin_id === currentUser.id && (
-                    <button onClick={(e) => deleteGroup(g.id, e)} className="text-gray-500 hover:text-red-500 hover:bg-red-500/10 p-2 rounded-full opacity-0 group-hover:opacity-100 transition-all flex-shrink-0">
+                    <button onClick={(e) => deleteGroup(g.id, e)} className="text-slate-400 hover:text-red-400 hover:bg-red-500/10 p-2 rounded-full opacity-0 group-hover:opacity-100 transition-all flex-shrink-0">
                       <Trash2 size={16} />
                     </button>
                   )}
@@ -708,16 +744,16 @@ export default function Sidebar({ currentUser, onSelect, onUpdateUser, onLogout 
       {/* --- PROFILE EDIT MODAL --- */}
       {showProfileModal && (
         <div className="fixed inset-0 bg-black/80 z-50 flex items-center justify-center p-4 backdrop-blur-sm">
-          <div className="bg-gray-900 w-full max-w-sm rounded-xl border border-gray-700 shadow-2xl overflow-hidden flex flex-col">
-            <div className="p-4 border-b border-gray-800 flex justify-between items-center bg-gray-900">
+          <div className="bg-slate-800 w-full max-w-sm rounded-xl border border-slate-600 shadow-2xl overflow-hidden flex flex-col max-h-[90vh] sm:max-h-[85vh]">
+            <div className="p-4 border-b border-slate-700 flex justify-between items-center bg-slate-800 flex-shrink-0">
               <h3 className="text-white font-bold text-lg">Edit Profile</h3>
-              <button onClick={() => setShowProfileModal(false)} className="text-gray-400 hover:text-white"><X size={20}/></button>
+              <button onClick={() => setShowProfileModal(false)} className="text-slate-300 hover:text-white"><X size={20}/></button>
             </div>
             
-            <div className="p-6 flex flex-col items-center gap-6">
+            <div className="p-6 flex flex-col items-center gap-6 overflow-y-auto flex-1 min-h-0">
               {/* Avatar Upload */}
               <div className="relative group cursor-pointer">
-                <img src={editAvatarPreview} className="w-32 h-32 rounded-full object-cover border-4 border-gray-800 group-hover:opacity-50 transition-opacity" />
+                <img src={editAvatarPreview} className="w-32 h-32 rounded-full object-cover border-4 border-slate-700 group-hover:opacity-50 transition-opacity" />
                 <div className="absolute inset-0 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity">
                   <Camera className="text-white" size={32} />
                 </div>
@@ -730,9 +766,9 @@ export default function Sidebar({ currentUser, onSelect, onUpdateUser, onLogout 
               </div>
               
               <div className="w-full space-y-2">
-                <label className="text-xs text-gray-400 uppercase font-bold">Nickname</label>
+                <label className="text-xs text-slate-300 uppercase font-bold">Nickname</label>
                 <input 
-                  className="w-full bg-gray-800 text-white p-3 rounded-lg border border-gray-700 focus:outline-none focus:border-blue-500"
+                  className="w-full bg-slate-700 text-white p-3 rounded-lg border border-slate-600 focus:outline-none focus:border-blue-500"
                   value={editNickname}
                   onChange={e => setEditNickname(e.target.value)}
                   placeholder="Enter nickname"
@@ -740,9 +776,9 @@ export default function Sidebar({ currentUser, onSelect, onUpdateUser, onLogout 
               </div>
 
               <div className="w-full space-y-2">
-                <label className="text-xs text-gray-500 uppercase font-bold">Username</label>
+                <label className="text-xs text-slate-400 uppercase font-bold">Username</label>
                  <input 
-                  className="w-full bg-gray-800/50 text-gray-500 p-3 rounded-lg border border-gray-800 cursor-not-allowed"
+                  className="w-full bg-slate-700/50 text-slate-400 p-3 rounded-lg border border-slate-600 cursor-not-allowed"
                   value={currentUser.username}
                   disabled
                   title="Username cannot be changed"
@@ -750,9 +786,9 @@ export default function Sidebar({ currentUser, onSelect, onUpdateUser, onLogout 
               </div>
               
               {/* Video Call Backgrounds Section */}
-              <div className="w-full space-y-3 border-t border-gray-800 pt-4">
+              <div className="w-full space-y-3 border-t border-slate-700 pt-4">
                 <div className="flex items-center justify-between">
-                  <label className="text-xs text-gray-400 uppercase font-bold">Video Call Backgrounds</label>
+                  <label className="text-xs text-slate-300 uppercase font-bold">Video Call Backgrounds</label>
                   <button
                     onClick={() => backgroundFileInputRef.current?.click()}
                     className="text-xs bg-blue-600 hover:bg-blue-500 px-3 py-1.5 rounded flex items-center gap-1.5 text-white transition-colors"
@@ -771,10 +807,10 @@ export default function Sidebar({ currentUser, onSelect, onUpdateUser, onLogout 
                 />
                 
                 {userBackgrounds.length > 0 && (
-                  <div className="grid grid-cols-2 gap-2 max-h-48 overflow-y-auto">
+                  <div className="grid grid-cols-2 gap-2 max-h-48 overflow-y-auto overscroll-contain">
                     {userBackgrounds.map(bg => (
                       <div key={bg.id} className="relative group">
-                        <div className="aspect-video bg-gray-800 rounded-lg overflow-hidden border border-gray-700">
+                        <div className="aspect-video bg-slate-700 rounded-lg overflow-hidden border border-slate-600">
                           <img 
                             src={bg.url} 
                             alt={bg.name}
@@ -788,27 +824,69 @@ export default function Sidebar({ currentUser, onSelect, onUpdateUser, onLogout 
                         >
                           <X size={12} className="text-white" />
                         </button>
-                        <p className="text-xs text-gray-400 mt-1 truncate">{bg.name}</p>
+                        <p className="text-xs text-slate-300 mt-1 truncate">{bg.name}</p>
                       </div>
                     ))}
                   </div>
                 )}
                 
                 {userBackgrounds.length === 0 && (
-                  <div className="text-center py-4 text-gray-500 text-sm">
+                  <div className="text-center py-4 text-slate-400 text-sm">
                     <ImageIcon size={24} className="mx-auto mb-2 opacity-50" />
                     <p>No custom backgrounds yet</p>
                     <p className="text-xs mt-1">Upload images to use as video call backgrounds</p>
                   </div>
                 )}
+                
+                {/* Background Selection */}
+                <div className="mt-4 space-y-2">
+                  <label className="text-xs text-slate-300 uppercase font-bold">Select Background</label>
+                  <div className="grid grid-cols-2 gap-2 max-h-64 overflow-y-auto overscroll-contain">
+                    {getAllBackgrounds().map(bg => (
+                      <button
+                        key={bg.id}
+                        onClick={() => handleBackgroundSelect(bg.id)}
+                        className={`relative p-2 rounded-lg border-2 transition-colors ${
+                          selectedBackground === bg.id 
+                            ? 'border-blue-500 bg-blue-600/20' 
+                            : 'border-slate-600 bg-slate-700 hover:bg-slate-600'
+                        }`}
+                      >
+                        {bg.id === 'none' ? (
+                          <div className="aspect-video bg-slate-800 rounded flex items-center justify-center">
+                            <span className="text-xs text-slate-300">None</span>
+                          </div>
+                        ) : bg.id === 'blur' ? (
+                          <div className="aspect-video bg-gradient-to-br from-slate-600 to-slate-800 rounded flex items-center justify-center">
+                            <span className="text-xs text-slate-300">Blur</span>
+                          </div>
+                        ) : (
+                          <div className="aspect-video bg-slate-700 rounded overflow-hidden">
+                            <img 
+                              src={bg.url || ''} 
+                              alt={bg.name}
+                              className="w-full h-full object-cover"
+                            />
+                          </div>
+                        )}
+                        <p className="text-xs text-slate-300 mt-1 truncate text-center">{bg.name}</p>
+                        {selectedBackground === bg.id && (
+                          <div className="absolute top-1 right-1 bg-blue-500 rounded-full p-1">
+                            <Check size={10} className="text-white" />
+                          </div>
+                        )}
+                      </button>
+                    ))}
+                  </div>
+                </div>
               </div>
             </div>
 
-            <div className="p-4 border-t border-gray-800 bg-gray-900">
+            <div className="p-4 border-t border-slate-700 bg-slate-800 flex-shrink-0">
               <button 
                 onClick={saveProfile} 
                 disabled={isUpdating}
-                className="w-full bg-blue-600 hover:bg-blue-500 disabled:bg-gray-800 disabled:text-gray-500 text-white font-bold py-3 rounded-lg transition-colors flex items-center justify-center gap-2"
+                className="w-full bg-blue-600 hover:bg-blue-500 disabled:bg-slate-700 disabled:text-slate-400 text-white font-bold py-3 rounded-lg transition-colors flex items-center justify-center gap-2"
               >
                 {isUpdating ? <Loader2 className="animate-spin" size={20} /> : <Save size={20} />}
                 Save Changes
@@ -821,14 +899,14 @@ export default function Sidebar({ currentUser, onSelect, onUpdateUser, onLogout 
       {/* --- OTHER MODALS (Friend / Group) --- */}
       {showFriendModal && (
         <div className="fixed inset-0 bg-black/80 z-50 flex items-center justify-center p-4 backdrop-blur-sm">
-          <div className="bg-gray-900 w-full max-w-md rounded-xl border border-gray-700 shadow-2xl overflow-hidden">
-            <div className="p-4 border-b border-gray-800 flex justify-between items-center">
+          <div className="bg-slate-800 w-full max-w-md rounded-xl border border-slate-600 shadow-2xl overflow-hidden">
+            <div className="p-4 border-b border-slate-700 flex justify-between items-center">
               <h3 className="text-white font-bold text-lg">Add a Friend</h3>
-              <button onClick={() => setShowFriendModal(false)} className="text-gray-400 hover:text-white"><X size={20}/></button>
+              <button onClick={() => setShowFriendModal(false)} className="text-slate-300 hover:text-white"><X size={20}/></button>
             </div>
             <div className="max-h-[60vh] overflow-y-auto p-2">
               {availableUsers.map(u => (
-                  <div key={u.id} className="flex items-center justify-between p-3 hover:bg-gray-800 rounded-lg group">
+                  <div key={u.id} className="flex items-center justify-between p-3 hover:bg-slate-700 rounded-lg group">
                     <div className="flex items-center gap-3">
                       <img src={u.avatar} className="w-10 h-10 rounded-full" />
                       <div><p className="text-white font-medium">{u.nickname || u.username}</p></div>
@@ -843,10 +921,10 @@ export default function Sidebar({ currentUser, onSelect, onUpdateUser, onLogout 
 
       {showGroupModal && (
         <div className="fixed inset-0 bg-black/80 z-50 flex items-center justify-center p-4 backdrop-blur-sm">
-          <div className="bg-gray-900 w-full max-w-md rounded-xl border border-gray-700 shadow-2xl overflow-hidden flex flex-col max-h-[80vh]">
-            <div className="p-4 border-b border-gray-800 flex justify-between items-center bg-gray-900">
+          <div className="bg-slate-800 w-full max-w-md rounded-xl border border-slate-600 shadow-2xl overflow-hidden flex flex-col max-h-[80vh]">
+            <div className="p-4 border-b border-slate-700 flex justify-between items-center bg-slate-800">
               <h3 className="text-white font-bold text-lg">Create New Group</h3>
-              <button onClick={() => setShowGroupModal(false)} className="text-gray-400 hover:text-white"><X size={20}/></button>
+              <button onClick={() => setShowGroupModal(false)} className="text-slate-300 hover:text-white"><X size={20}/></button>
             </div>
             <div className="p-4 overflow-y-auto">
               <input className="w-full bg-gray-800 text-white p-3 rounded-lg border border-gray-700 mb-6" placeholder="Group Name" value={newGroupName} onChange={e => setNewGroupName(e.target.value)} />
