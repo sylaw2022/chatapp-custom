@@ -114,3 +114,36 @@ body > *:last-child[style*="bottom"]:not([data-chat-input]) {
     padding-bottom: 120px !important;
   }
 }
+
+/* Leaflet map styles */
+.leaflet-container {
+  height: 100% !important;
+  width: 100% !important;
+  z-index: 1;
+  min-height: 400px;
+}
+
+.leaflet-map-pane {
+  height: 100% !important;
+  width: 100% !important;
+}
+
+.leaflet-tile-pane {
+  height: 100% !important;
+  width: 100% !important;
+}
+
+.leaflet-popup-content-wrapper {
+  border-radius: 8px;
+}
+
+.leaflet-popup-content {
+  margin: 12px;
+  font-size: 14px;
+}
+
+/* Custom current location marker */
+.current-location-marker {
+  background: transparent !important;
+  border: none !important;
+}

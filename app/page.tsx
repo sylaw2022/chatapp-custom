@@ -1,14 +1,21 @@
 'use client'
 import { useState, useEffect } from 'react'
 import Auth from '@/components/Auth'
+import AppLauncher from '@/components/AppLauncher'
 import Sidebar from '@/components/Sidebar'
 import ChatWindow from '@/components/ChatWindow'
+import Navigation from '@/components/Navigation'
+import RestaurantSearch from '@/components/RestaurantSearch'
+import SOS from '@/components/SOS'
 import IncomingCall from '@/components/IncomingCall'
 import { User } from '@/types'
 import { createClient } from '@/lib/supabase'
 
+type ActiveApp = 'launcher' | 'chat' | 'navigation' | 'restaurant' | 'sos'
+
 export default function Home() {
   const [currentUser, setCurrentUser] = useState<User | null>(null)
+  const [activeApp, setActiveApp] = useState<ActiveApp>('launcher')
   const [activeChat, setActiveChat] = useState<any>(null)
   const [isGroup, setIsGroup] = useState(false)
   
@@ -206,6 +213,57 @@ export default function Home() {
 
   if (!currentUser) return <Auth onLogin={setCurrentUser} />
 
+  // Show app launcher first
+  if (activeApp === 'launcher') {
+    return (
+      <AppLauncher
+        currentUser={currentUser}
+        onSelectApp={(app) => {
+          setActiveApp(app)
+          if (app === 'chat') {
+            // When opening chat, we'll show the sidebar
+          }
+        }}
+        onLogout={() => {
+          setCurrentUser(null)
+          setActiveApp('launcher')
+          setActiveChat(null)
+        }}
+      />
+    )
+  }
+
+  // Show Navigation app
+  if (activeApp === 'navigation') {
+    return (
+      <Navigation
+        currentUser={currentUser}
+        onBack={() => setActiveApp('launcher')}
+      />
+    )
+  }
+
+  // Show Restaurant Search app
+  if (activeApp === 'restaurant') {
+    return (
+      <RestaurantSearch
+        currentUser={currentUser}
+        onBack={() => setActiveApp('launcher')}
+      />
+    )
+  }
+
+  // Show SOS Emergency app
+  if (activeApp === 'sos') {
+    return (
+      <SOS
+        currentUser={currentUser}
+        onBack={() => setActiveApp('launcher')}
+      />
+    )
+  }
+
+  // Show Chat app (existing functionality)
   return (
     <main className="flex h-screen bg-slate-900 relative" style={{ height: '100vh', overflow: 'hidden' }}>
       {incomingCall && (
@@ -242,7 +300,15 @@ export default function Home() {
           currentUser={currentUser} 
           onSelect={(chat, group) => { setActiveChat(chat); setIsGroup(group); }} 
           onUpdateUser={handleProfileUpdate}
-          onLogout={() => setCurrentUser(null)} // Logout handler
+          onBackToLauncher={() => {
+            setActiveApp('launcher')
+            setActiveChat(null)
+          }}
+          onLogout={() => {
+            setCurrentUser(null)
+            setActiveApp('launcher')
+            setActiveChat(null)
+          }}
         />
       </div>
       
@@ -260,7 +326,9 @@ export default function Home() {
           activeChat={activeChat} 
           isGroup={isGroup} 
           acceptedCallMode={acceptedCallMode} 
-          onBack={() => setActiveChat(null)}
+          onBack={() => {
+            setActiveChat(null)
+          }}
           onCallEnd={() => {
             console.log('📞 Call ended, resetting acceptedCallMode');
             setAcceptedCallMode(null);
