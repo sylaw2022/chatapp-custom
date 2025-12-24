@@ -2,13 +2,14 @@
 import { useEffect, useState, useRef } from 'react'
 import { createClient } from '@/lib/supabase'
 import { User, Group, Message } from '@/types'
-import { UserPlus, Users, MessageSquare, X, Search, Check, Plus, Trash2, Settings, Camera, Loader2, Save, RefreshCw, LogOut, Upload, Image as ImageIcon } from 'lucide-react'
+import { UserPlus, Users, MessageSquare, X, Search, Check, Plus, Trash2, Settings, Camera, Loader2, Save, RefreshCw, LogOut, Upload, Image as ImageIcon, Home } from 'lucide-react'
 
 interface SidebarProps {
   currentUser: User;
   onSelect: (chat: any, isGroup: boolean) => void;
   onUpdateUser: (updatedUser: User) => void;
   onLogout: () => void; // New Prop for logout
+  onBackToLauncher?: () => void; // New Prop to go back to launcher
 }
 
 interface FriendWithLatestMessage extends User {
@@ -19,7 +20,7 @@ interface GroupWithLatestMessage extends Group {
   latestMessage?: Message | null;
 }
 
-export default function Sidebar({ currentUser, onSelect, onUpdateUser, onLogout }: SidebarProps) {
+export default function Sidebar({ currentUser, onSelect, onUpdateUser, onLogout, onBackToLauncher }: SidebarProps) {
   const [friends, setFriends] = useState<FriendWithLatestMessage[]>([])
   const [groups, setGroups] = useState<GroupWithLatestMessage[]>([])
   const [view, setView] = useState<'friends' | 'groups'>('friends')
@@ -539,6 +540,17 @@ export default function Sidebar({ currentUser, onSelect, onUpdateUser, onLogout 
         </div>
         {/* Action Buttons */}
         <div className="flex items-center gap-2">
+          {/* Home Button - Back to Launcher */}
+          {onBackToLauncher && (
+            <button 
+              onClick={onBackToLauncher}
+              className="p-2 text-slate-300 hover:text-blue-400 hover:bg-slate-700 rounded-full transition-colors"
+              title="Back to Apps"
+            >
+              <Home size={20} />
+            </button>
+          )}
+          
           {/* Settings Button */}
           <button 
             onClick={() => setShowProfileModal(true)}
